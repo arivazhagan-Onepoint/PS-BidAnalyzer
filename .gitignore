@@ -1,0 +1,23 @@
+# Credentials & tokens — never commit (ignore the whole folder)
+credentials/
+
+# Generated data output
+extract_json/
+target_json/
+adapters/**/extract_json/
+adapters/**/target_json/
+
+# Logs
+*.log
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Claude Code local settings
+.claude/settings.local.json
+
+#Project specific configuration files to be exluded
+project_config*.json
+project_config.json
