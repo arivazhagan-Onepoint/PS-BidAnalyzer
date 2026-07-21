@@ -27,6 +27,7 @@ from .config import (
     UK_TIMEZONE,
     ENVIRONMENT,
     NOTIFICATIONS,
+    SHEET_NAME,
     STATUS_FIELD,
     PROCESS_STATUSES,
     should_analyse,
@@ -125,6 +126,11 @@ def run(limit: int = None, window_date: str = None) -> dict:
 
     summary = {"analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0, "skipped": 0,
                "out_of_window": 0, "errors": 0, "copied_to_nobids": 0}
+    # Link the alert email straight to the PS Tender Tracker tab (uses the tab's
+    # numeric gid so it opens on that tab, not just the spreadsheet default).
+    summary["sheet_url"] = (
+        f"https://docs.google.com/spreadsheets/d/{client.sheet_id}/edit#gid={client.sheet_tab_id}"
+    )
     updates = []
     row_color_map = {}   # row number -> background colour for changed rows
 
@@ -263,6 +269,12 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
         for label, value in metric_rows
     )
 
+    sheet_url = s.get("sheet_url")
+    sheet_link = (
+        f'<p><b>Sheet:</b> <a href="{sheet_url}">{SHEET_NAME}</a></p>'
+        if sheet_url else ""
+    )
+
     details = ""
     if error_tb:
         details = (
@@ -281,6 +293,7 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
      <b>Started:</b> {started_at}<br>
      <b>Finished:</b> {finished_at}<br>
      <b>One-day window ({WINDOW_DATE_FIELD}):</b> {window_date}</p>
+  {sheet_link}
   <table cellpadding="8" cellspacing="0" border="1"
          style="border-collapse:collapse;border-color:#ddd;font-size:14px">
     <tr style="background:#f0f0f0"><th align="left">Metric</th><th>Count</th></tr>
