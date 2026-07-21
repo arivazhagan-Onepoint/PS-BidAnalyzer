@@ -33,6 +33,8 @@ from .config import (
     WINDOW_DATE_FIELD,
     in_day_window,
     qualification_family,
+    COPY_TO_NOBIDS_STATUS,
+    NOBIDS_SHEET_NAME,
 )
 from .analyzer import analyze_tender
 from .sheets_client import SheetsClient, status_color
@@ -121,7 +123,8 @@ def run(limit: int = None, window_date: str = None) -> dict:
     if limit is not None:
         logger.info(f"--limit applied: analysing at most {limit} qualifying tender(s)")
 
-    summary = {"analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0, "skipped": 0, "out_of_window": 0, "errors": 0}
+    summary = {"analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0, "skipped": 0,
+               "out_of_window": 0, "errors": 0, "copied_to_nobids": 0}
     updates = []
     row_color_map = {}   # row number -> background colour for changed rows
 
@@ -184,6 +187,20 @@ def run(limit: int = None, window_date: str = None) -> dict:
         client.write_qualifications(updates)
         client.apply_row_colors(row_color_map)
 
+    # Post-run: reconcile the PS NoBids tab with every manually-set NoBid(Human)
+    # row across the ENTIRE sheet (not just this run's window), de-duplicated by
+    # ID/OCID. These are human overrides the analyzer never writes, so the
+    # tenders read at the start of the run already reflect their status. A sync
+    # failure is logged but never aborts the run.
+    try:
+        summary["copied_to_nobids"] = client.sync_matching_to_tab(
+            tenders, COPY_TO_NOBIDS_STATUS, NOBIDS_SHEET_NAME
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to copy '{COPY_TO_NOBIDS_STATUS}' rows to '{NOBIDS_SHEET_NAME}': {e}"
+        )
+
     logger.info("=" * 80)
     logger.info("BID ANALYSIS COMPLETE — SUMMARY")
     logger.info("=" * 80)
@@ -194,6 +211,7 @@ def run(limit: int = None, window_date: str = None) -> dict:
     logger.info(f"  Skipped  : {summary['skipped']} (in-window, wrong status / no text)")
     logger.info(f"  Out of window : {summary['out_of_window']}")
     logger.info(f"  Errors   : {summary['errors']}")
+    logger.info(f"  {NOBIDS_SHEET_NAME} total (deduped) : {summary['copied_to_nobids']}")
     logger.info("=" * 80)
     return summary
 
@@ -238,6 +256,7 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
         ("Skipped (wrong status / no text)", s.get("skipped", 0)),
         ("Out of window", s.get("out_of_window", 0)),
         ("Errors", s.get("errors", 0)),
+        (f"{NOBIDS_SHEET_NAME} total (deduped)", s.get("copied_to_nobids", 0)),
     ]
     rows = "".join(
         f"<tr><td>{label}</td><td style='text-align:right'>{value}</td></tr>"

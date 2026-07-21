@@ -92,6 +92,13 @@ PROCESS_STATUSES = {"PreQualified", "ReCheck"}
 # Column holding the qualification status used for the filter above.
 STATUS_FIELD = "Bid Qualification"
 
+# --- Post-run copy: manual NoBid(Human) rows -> the 'PS NoBids' tab ----------
+# At the end of every run, each row whose Bid Qualification exactly matches this
+# value is appended to the NOBIDS_SHEET_NAME tab (blind append; columns matched
+# by header name). These are human-set overrides the analyzer never writes, so
+# they capture manual NoBid decisions in a dedicated tab.
+COPY_TO_NOBIDS_STATUS = "NoBid(Human)"
+
 
 def should_analyse(status: str) -> bool:
     """True for system PreQualified/ReCheck statuses (skips manual overrides)."""

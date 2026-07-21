@@ -25,6 +25,7 @@ from .config import (
     SHEET_NAME,
     TARGET_FOLDER_ID,
     DATASET_FIELDS,
+    STATUS_FIELD,
     UK_TIMEZONE,
     qualification_family,
 )
@@ -228,6 +229,99 @@ class SheetsClient:
         )
         logger.info(f"Wrote qualification updates to {len(updates)} row(s) ({len(data)} cells)")
         return len(updates)
+
+    def sync_matching_to_tab(self, tenders: list, status_value: str, tab_name: str) -> int:
+        """Reconcile ``tab_name`` so it holds every source row whose Bid
+        Qualification equals ``status_value``, de-duplicated.
+
+        The whole sheet is scanned (no date window). Columns are matched to the
+        target's header row (row 1) by name, so the target may hold any subset of
+        the source columns in any order. The tab's data region (row 2 down) is
+        rewritten to the de-duplicated union of the rows already present and the
+        freshly-matched source rows, keyed by ID (falling back to OCID / Direct
+        URL / Name). Rows already in the tab are preserved; exact duplicates
+        collapse to one. Returns the number of data rows in the tab after sync.
+        """
+        # 1. Target header row (row 1) -> column layout.
+        header_res = self._execute_with_retry(
+            lambda: self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=self.sheet_id,
+                range=f"'{tab_name}'!1:1",
+            ).execute()
+        )
+        header_rows = header_res.get("values", [])
+        target_headers = [h for h in (header_rows[0] if header_rows else []) if h]
+        if not target_headers:
+            logger.warning(f"Tab '{tab_name}' has no header row; skipping sync.")
+            return 0
+        last_col = _col_letter(len(target_headers))
+
+        def row_key(values: list) -> str:
+            """De-dup key for a target-shaped row (list aligned to target_headers)."""
+            lookup = {h: (values[i] if i < len(values) else "") for i, h in enumerate(target_headers)}
+            for field in ("ID", "OCID", "Direct URL", "Name"):
+                v = (lookup.get(field, "") or "").strip()
+                if v:
+                    return f"{field}={v.lower()}"
+            # No stable identifier — fall back to the whole row so identical rows
+            # still collapse but distinct ones are kept.
+            return "row=" + "".join((v or "").strip().lower() for v in values)
+
+        # 2. Existing data rows (row 2 down), ignoring fully-blank rows.
+        existing_res = self._execute_with_retry(
+            lambda: self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=self.sheet_id,
+                range=f"'{tab_name}'!A2:{last_col}",
+            ).execute()
+        )
+        existing_rows = [
+            r for r in existing_res.get("values", [])
+            if any((c or "").strip() for c in r)
+        ]
+
+        # 3. Source rows matching the status, across the ENTIRE sheet.
+        matching = [
+            t for t in tenders
+            if (t.data.get(STATUS_FIELD, "") or "").strip() == status_value
+        ]
+
+        # 4. De-duplicated union: existing rows first (preserve order, collapse
+        #    dupes), then any freshly-matched source row not already present.
+        seen, final_rows = set(), []
+
+        def add(values: list) -> bool:
+            key = row_key(values)
+            if key in seen:
+                return False
+            seen.add(key)
+            final_rows.append(values)
+            return True
+
+        kept = sum(1 for r in existing_rows if add(r))
+        removed = len(existing_rows) - kept
+        added = sum(1 for t in matching if add([t.data.get(h, "") for h in target_headers]))
+
+        # 5. Rewrite the data region: clear below the header, then write the set.
+        self._execute_with_retry(
+            lambda: self.sheets_service.spreadsheets().values().clear(
+                spreadsheetId=self.sheet_id,
+                range=f"'{tab_name}'!A2:{last_col}",
+            ).execute()
+        )
+        if final_rows:
+            self._execute_with_retry(
+                lambda: self.sheets_service.spreadsheets().values().update(
+                    spreadsheetId=self.sheet_id,
+                    range=f"'{tab_name}'!A2",
+                    valueInputOption="RAW",
+                    body={"values": final_rows},
+                ).execute()
+            )
+        logger.info(
+            f"Synced '{tab_name}' for {STATUS_FIELD} == '{status_value}': "
+            f"{len(final_rows)} row(s) total (added {added}, removed {removed} duplicate(s))"
+        )
+        return len(final_rows)
 
     def apply_row_colors(self, row_color_map: dict) -> int:
         """Apply a background colour to entire rows in one batchUpdate call.

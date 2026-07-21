@@ -19,6 +19,10 @@ SCOPES           = ['https://www.googleapis.com/auth/spreadsheets', 'https://www
 ENVIRONMENT      = _project["google_sheets"].get("environment", "N/A")
 TARGET_FOLDER_ID = _project["google_sheets"]["target_folder_id"]
 SHEET_NAME       = _project["google_sheets"]["sheet_name"]
+# Secondary tab that manually-set NoBid(Human) rows are copied into at the end of
+# each run (see analyzer/main.py). Its header row (row 1) may hold any subset of
+# DATASET_FIELDS in any order; columns are matched by name at copy time.
+NOBIDS_SHEET_NAME = _project["google_sheets"].get("nobids_tab_name", "PS NoBids")
 
 # Email notifications (SMTP). Non-secret settings live in the "notifications"
 # block of project_config.json; optional SMTP credentials (for relays that
