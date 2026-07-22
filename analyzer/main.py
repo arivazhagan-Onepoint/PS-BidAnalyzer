@@ -34,10 +34,9 @@ from .config import (
     WINDOW_DATE_FIELD,
     in_day_window,
     qualification_family,
-    COPY_TO_NOBIDS_STATUS,
-    NOBIDS_SHEET_NAME,
 )
 from .analyzer import analyze_tender
+from .nobid_patterns import load_nobid_patterns
 from .sheets_client import SheetsClient, status_color
 
 # notifier.py lives at the project root (stdlib-only email transport), importable
@@ -125,12 +124,18 @@ def run(limit: int = None, window_date: str = None) -> dict:
         logger.info(f"--limit applied: analysing at most {limit} qualifying tender(s)")
 
     summary = {"analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0, "skipped": 0,
-               "out_of_window": 0, "errors": 0, "copied_to_nobids": 0}
+               "out_of_window": 0, "errors": 0}
     # Link the alert email straight to the PS Tender Tracker tab (uses the tab's
     # numeric gid so it opens on that tab, not just the spreadsheet default).
     summary["sheet_url"] = (
         f"https://docs.google.com/spreadsheets/d/{client.sheet_id}/edit#gid={client.sheet_tab_id}"
     )
+
+    # Distilled NoBid precedent (built separately by analyzer.maintain_nobids).
+    # Loaded once and passed into every analyze_tender() call; empty if never
+    # built, in which case the analyzer simply injects nothing.
+    nobid_patterns = load_nobid_patterns()
+
     updates = []
     row_color_map = {}   # row number -> background colour for changed rows
 
@@ -173,7 +178,8 @@ def run(limit: int = None, window_date: str = None) -> dict:
 
         logger.info(f"[{idx}/{len(in_window)}] Row {tender.row}: analysing '{title[:70]}' (status: {status})")
         try:
-            analysis = analyze_tender(title, description, run_date=run_dt)
+            analysis = analyze_tender(title, description, run_date=run_dt,
+                                      nobid_patterns=nobid_patterns)
         except Exception as e:
             logger.error(f"Row {tender.row}: unexpected analyzer error: {e}")
             summary["errors"] += 1
@@ -193,20 +199,6 @@ def run(limit: int = None, window_date: str = None) -> dict:
         client.write_qualifications(updates)
         client.apply_row_colors(row_color_map)
 
-    # Post-run: reconcile the PS NoBids tab with every manually-set NoBid(Human)
-    # row across the ENTIRE sheet (not just this run's window), de-duplicated by
-    # ID/OCID. These are human overrides the analyzer never writes, so the
-    # tenders read at the start of the run already reflect their status. A sync
-    # failure is logged but never aborts the run.
-    try:
-        summary["copied_to_nobids"] = client.sync_matching_to_tab(
-            tenders, COPY_TO_NOBIDS_STATUS, NOBIDS_SHEET_NAME
-        )
-    except Exception as e:
-        logger.error(
-            f"Failed to copy '{COPY_TO_NOBIDS_STATUS}' rows to '{NOBIDS_SHEET_NAME}': {e}"
-        )
-
     logger.info("=" * 80)
     logger.info("BID ANALYSIS COMPLETE — SUMMARY")
     logger.info("=" * 80)
@@ -217,7 +209,6 @@ def run(limit: int = None, window_date: str = None) -> dict:
     logger.info(f"  Skipped  : {summary['skipped']} (in-window, wrong status / no text)")
     logger.info(f"  Out of window : {summary['out_of_window']}")
     logger.info(f"  Errors   : {summary['errors']}")
-    logger.info(f"  {NOBIDS_SHEET_NAME} total (deduped) : {summary['copied_to_nobids']}")
     logger.info("=" * 80)
     return summary
 
@@ -262,7 +253,6 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
         ("Skipped (wrong status / no text)", s.get("skipped", 0)),
         ("Out of window", s.get("out_of_window", 0)),
         ("Errors", s.get("errors", 0)),
-        (f"{NOBIDS_SHEET_NAME} total (deduped)", s.get("copied_to_nobids", 0)),
     ]
     rows = "".join(
         f"<tr><td>{label}</td><td style='text-align:right'>{value}</td></tr>"

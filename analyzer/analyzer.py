@@ -58,13 +58,29 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _build_prompt(title: str, description: str, context: str) -> str:
+def _build_prompt(title: str, description: str, context: str, nobid_patterns: str = "") -> str:
     context_block = context if context else "(No Onepoint capability context provided.)"
+
+    # Optional second block: distilled precedent from past human NoBid decisions.
+    # Framed as decision precedent, NOT a capability source — capability is still
+    # judged only from the block above — so the grounding rule stays intact.
+    precedent_block = ""
+    if nobid_patterns:
+        precedent_block = f"""
+Past NoBid decision heuristics (precedent — patterns Onepoint has previously
+judged NOT worth bidding, and why). Use these to recognise poor-fit patterns and
+calibrate the score DOWN when this tender clearly matches them. This is decision
+precedent, NOT a capability source — judge capability ONLY from the context above:
+---
+{nobid_patterns}
+---
+"""
+
     return f"""Onepoint capability context (use ONLY this to judge capability):
 ---
 {context_block}
 ---
-
+{precedent_block}
 Tender under review:
 Title: {title}
 Description: {description}
@@ -78,11 +94,15 @@ Respond with ONLY a JSON object — no markdown, no explanation:
 {{"score": <integer 0-100>, "reason": "<2-4 sentence summary justifying the score, citing the specific capability matches or gaps>"}}"""
 
 
-def analyze_tender(title: str, description: str, run_date: datetime = None) -> BidAnalysis:
+def analyze_tender(title: str, description: str, run_date: datetime = None,
+                   nobid_patterns: str = "") -> BidAnalysis:
     """Analyse one tender and return a BidAnalysis.
 
-    On empty input or API failure, returns a NoBid with a system-generated reason
-    explaining why, so the caller can always record a deterministic result.
+    ``nobid_patterns`` is the optional distilled NoBid precedent (see
+    analyzer.nobid_patterns); when provided it is injected into the prompt as a
+    secondary decision signal. On empty input or API failure, returns a NoBid
+    with a system-generated reason so the caller always records a deterministic
+    result.
     """
     if run_date is None:
         run_date = datetime.now(UK_TIMEZONE)
@@ -100,7 +120,7 @@ def analyze_tender(title: str, description: str, run_date: datetime = None) -> B
         )
 
     context = load_onepoint_context()
-    prompt = _build_prompt(title, description, context)
+    prompt = _build_prompt(title, description, context, nobid_patterns)
 
     last_error = None
     for attempt in range(1, ANALYZER_MAX_RETRIES + 1):

@@ -198,6 +198,31 @@ class SheetsClient:
         logger.info(f"Read {len(tenders)} tender rows from the sheet")
         return tenders
 
+    def read_tab(self, tab_name: str) -> list:
+        """Read a tab whose header is row 1 as a list of {header: value} dicts.
+
+        Used by the maintenance flow to read the PS NoBids tab. Blank trailing
+        cells are returned as "". Rows that are entirely blank are skipped.
+        Returns [] if the tab has no header row or no data.
+        """
+        result = self._execute_with_retry(
+            lambda: self.sheets_service.spreadsheets().values().get(
+                spreadsheetId=self.sheet_id,
+                range=f"'{tab_name}'!A:Z",
+            ).execute()
+        )
+        values = result.get("values", [])
+        if not values:
+            return []
+        headers = [h for h in values[0] if h]
+        rows = []
+        for row in values[1:]:
+            if not any((c or "").strip() for c in row):
+                continue
+            rows.append({h: (row[i] if i < len(row) else "") for i, h in enumerate(headers)})
+        logger.info(f"Read {len(rows)} data row(s) from tab '{tab_name}'")
+        return rows
+
     # --- write ---------------------------------------------------------------
     def _cell_range(self, field: str, row: int) -> str:
         col = _col_letter(self._field_idx[field] + 1)
