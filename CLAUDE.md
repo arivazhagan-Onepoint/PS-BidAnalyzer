@@ -38,6 +38,10 @@ pip install -r requirements.txt
 python -m analyzer.main                     # analyse today's window (UK time)
 python -m analyzer.main --date 2026-07-03   # analyse a specific day (backfill / rerun)
 python -m analyzer.main --limit 5           # cap to the first 5 qualifying rows (quick test)
+
+# Knowledge maintenance — separate cadence, NOT per analysis run:
+python -m analyzer.maintain_knowledge          # extract + distil (respects the data guards)
+python -m analyzer.maintain_knowledge --force  # distil below the example minimums (testing)
 ```
 
 There is no automated test suite yet; `--limit` is the quick-check mechanism.
@@ -66,11 +70,12 @@ Entry point is `analyzer/main.py`, which orchestrates one run:
 2. Row selection — only rows whose `Bid Qualification` is `PreQualified`/`ReCheck`
    **and** whose `Last Modified Date` falls in the target one-day window are analysed
    (skips manual overrides and already-processed rows).
-3. `analyzer.py` — `analyze_tender(title, description)` builds a prompt from the
-   Onepoint context (`onepoint_context.py`), calls Gemini, and maps the returned
-   score (0–100) to `Bid(AI)` / `TBD(AI)` / `NoBid(AI)` via thresholds in
-   `config.py`. Retries transient/incomplete replies up to `ANALYZER_MAX_RETRIES`;
-   on total failure returns a deterministic `NoBid(AI)`.
+3. `analyzer.py` — `analyze_tender(title, description, nobid_patterns=…, bid_patterns=…)`
+   builds a prompt from the Onepoint context (`onepoint_context.py`) plus the
+   distilled decision precedent (`patterns.py`, loaded once per run in `main.py`),
+   calls Gemini, and maps the returned score (0–100) to `Bid(AI)` / `TBD(AI)` /
+   `NoBid(AI)` via thresholds in `config.py`. Retries transient/incomplete replies up
+   to `ANALYZER_MAX_RETRIES`; on total failure returns a deterministic `NoBid(AI)`.
 4. Write-back — `main.py` writes `Bid Qualification`, prepends the dated reason
    to `Bid Qualification Reason(System)` (newest first; prior runs kept below),
    writes `Bid Qualification Date`, appends a `Comments` entry, updates the
@@ -84,6 +89,57 @@ credential paths, UK timezone, `NOTIFICATIONS`); `analyzer/config.py` re-exports
 and adds the analyzer-specific settings (model, thresholds, retries, window, thinking
 budget).
 
+## Bid knowledge maintenance
+
+`analyzer/maintain_knowledge.py` is a **separate, scheduled flow** — not part of an
+analysis run. It turns the team's manual decisions into decision precedent in two
+steps, both iterating the `KNOWLEDGE_SOURCES` table in `analyzer/config.py` so each
+polarity runs through identical code:
+
+1. **Extract** — one read of the sheet, then `sync_matching_to_tab()` per source:
+   `NoBid(Human)` → `PS NoBids`, `Bid(Human)` → `PS Bids`. Deduped by ID / OCID /
+   Direct URL / Name; idempotent. Columns are matched to each tab's row-1 header
+   **by name**; a header-less tab is skipped with a warning.
+2. **Distil** — one Gemini call per source, consolidating that tab's
+   `Bid Qualification Reason(Human)` notes into general heuristics →
+   `knowledge/nobid_patterns.md` and `knowledge/bid_patterns.md` (both gitignored).
+
+Invariants worth preserving when changing this code:
+
+- **Only human-set statuses feed it** — never `Bid(AI)`/`NoBid(AI)`, or the analyzer
+  starts learning from its own output.
+- **Sources are fully independent** — own guard, own LLM call, own file, own error
+  handling. One polarity's failure or data shortfall must never touch the other's
+  artifact.
+- **Guards protect existing files.** A source regenerates only with ≥ its
+  `min_examples` distinct genuine reasons (`NOBID_MIN_EXAMPLES` 5, `BID_MIN_EXAMPLES`
+  3; junk filtered by `genuine_reasons()`). `--force` bypasses the minimums but a
+  source with **zero** reasons is still skipped — there is nothing to distil.
+- **The capability wall.** Precedent is injected as a *separate* prompt block framed
+  as decision precedent, never merged into the capability context. Capability is
+  judged only from `onepoint_capabilities.md`, which is hand-authored and tracked in
+  git — no generated content may overwrite it.
+
+Both artifacts are injected into the analysis prompt. `analyzer/patterns.py` loads
+each (one path-keyed cache, `load_nobid_patterns()` / `load_bid_patterns()`),
+`analyzer.main` loads them once per run and threads both into every
+`analyze_tender()` call, and `_build_prompt()` emits one fenced block per polarity —
+NoBid instructing "calibrate the score DOWN", Bid "calibrate the score UP". A block
+is omitted entirely when its file is absent/empty, so deleting a patterns file
+disables that direction cleanly.
+
+**Open decision:** there is no conflict rule. A tender matching both a Decline and a
+Pursue heuristic is resolved however the model weighs them on that call, so its
+qualification can vary between runs. The recommended fix is one prompt line making
+documented blockers (geography, clearance, out-of-scope) win over appetite — not yet
+agreed, so don't add it unasked.
+
+**Watch the inflation direction.** `Bid > 75` is the expensive threshold to cross by
+mistake: a false `Bid(AI)` costs bid-team time, whereas a false `NoBid(AI)` can still
+be recovered via `ReCheck`. When changing the Bid block's wording or the thresholds,
+A/B the current `TBD(AI)` rows (the ones near the boundary) rather than clear misses —
+poor-fit tenders show no difference either way and prove nothing.
+
 ## Email notifications
 
 Every run sends exactly one HTML summary email, colour-coded by outcome:
@@ -94,9 +150,21 @@ Every run sends exactly one HTML summary email, colour-coded by outcome:
 - ❌ **FAILURE** (red) — the run aborted with an exception; the email embeds the
   traceback and the process still exits non-zero (so schedulers register it).
 
-The body reports environment, start/finish times, the one-day window date, and
-the full summary table (Analysed / Bid / TBD / NoBid / Skipped / Out of window /
-Errors).
+The body reports environment, start/finish times, the one-day window date, then
+two tables:
+
+- **Overall Summary** — sheet-wide Bid and TBD totals across *every* row in the
+  tracker (not just this run), rolled up by qualification family so `Bid(AI)`,
+  `Bid(Human)` and bare `Bid` count together, plus a "Tenders Needing your
+  Attention" total. Counted in `run()` off the rows already read — no extra API
+  call — with this run's new qualifications substituted in so the totals reflect
+  the sheet after write-back. Omitted entirely on a fatal error, where no totals
+  were produced (better than showing a misleading 0).
+- **Bid Analysis - This Run** — the per-run metrics (Analysed / Bid / TBD / NoBid /
+  Skipped / Out of window / Errors).
+
+The sheet hyperlink sits between them. The sheet-wide figures are also written to
+the run log so a run is auditable without opening the email.
 
 Configuration lives in the `notifications` block of `project_config.json`
 (exposed as `config.NOTIFICATIONS`):
@@ -124,6 +192,8 @@ notifier in the upstream **PS-WebScrapper** module.
 |------|------|
 | `analyzer/main.py` | Entry point — read sheet → select → analyse → write back |
 | `analyzer/analyzer.py` | `analyze_tender()` — prompt, Gemini call, score → qualification |
+| `analyzer/maintain_knowledge.py` | Standalone knowledge maintenance — extract human decisions → distil heuristics |
+| `analyzer/patterns.py` | Loads the distilled Bid/NoBid precedent (cached per path, graceful when absent) |
 | `analyzer/gemini_client.py` | Native Gemini client wrapper (active provider) |
 | `analyzer/openrouter_client.py` | OpenRouter/OpenAI wrapper (backup, unused) |
 | `analyzer/onepoint_context.py` | Loads the Onepoint capability context |

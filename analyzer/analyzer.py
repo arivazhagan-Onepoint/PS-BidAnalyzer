@@ -58,21 +58,34 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _build_prompt(title: str, description: str, context: str, nobid_patterns: str = "") -> str:
+def _build_prompt(title: str, description: str, context: str, nobid_patterns: str = "",
+                  bid_patterns: str = "") -> str:
     context_block = context if context else "(No Onepoint capability context provided.)"
 
-    # Optional second block: distilled precedent from past human NoBid decisions.
-    # Framed as decision precedent, NOT a capability source — capability is still
-    # judged only from the block above — so the grounding rule stays intact.
+    # Optional extra blocks: distilled precedent from past human decisions, one per
+    # polarity. Both are framed as decision precedent, NOT a capability source —
+    # capability is still judged only from the block above — so the grounding rule
+    # stays intact. Each block is omitted entirely when its file is absent/empty.
     precedent_block = ""
     if nobid_patterns:
-        precedent_block = f"""
+        precedent_block += f"""
 Past NoBid decision heuristics (precedent — patterns Onepoint has previously
 judged NOT worth bidding, and why). Use these to recognise poor-fit patterns and
 calibrate the score DOWN when this tender clearly matches them. This is decision
 precedent, NOT a capability source — judge capability ONLY from the context above:
 ---
 {nobid_patterns}
+---
+"""
+    if bid_patterns:
+        precedent_block += f"""
+Past Bid decision heuristics (precedent — patterns Onepoint has previously judged
+WORTH bidding, and why). Use these to recognise strong-fit patterns and calibrate
+the score UP when this tender clearly matches them. These describe commercial
+appetite and winnable fit — they are NOT a capability source, and never treat them
+as extending Onepoint's capabilities beyond the context above:
+---
+{bid_patterns}
 ---
 """
 
@@ -95,12 +108,13 @@ Respond with ONLY a JSON object — no markdown, no explanation:
 
 
 def analyze_tender(title: str, description: str, run_date: datetime = None,
-                   nobid_patterns: str = "") -> BidAnalysis:
+                   nobid_patterns: str = "", bid_patterns: str = "") -> BidAnalysis:
     """Analyse one tender and return a BidAnalysis.
 
-    ``nobid_patterns`` is the optional distilled NoBid precedent (see
-    analyzer.nobid_patterns); when provided it is injected into the prompt as a
-    secondary decision signal. On empty input or API failure, returns a NoBid
+    ``nobid_patterns`` and ``bid_patterns`` are the optional distilled decision
+    precedent (see analyzer.patterns); each is injected into the prompt as a
+    secondary signal when provided — NoBid heuristics calibrate the score down,
+    Bid heuristics calibrate it up. On empty input or API failure, returns a NoBid
     with a system-generated reason so the caller always records a deterministic
     result.
     """
@@ -120,7 +134,7 @@ def analyze_tender(title: str, description: str, run_date: datetime = None,
         )
 
     context = load_onepoint_context()
-    prompt = _build_prompt(title, description, context, nobid_patterns)
+    prompt = _build_prompt(title, description, context, nobid_patterns, bid_patterns)
 
     last_error = None
     for attempt in range(1, ANALYZER_MAX_RETRIES + 1):
@@ -206,8 +220,3 @@ def _parse_response(raw: str) -> dict:
             text = text[4:]
         text = text.strip()
     return json.loads(text)
-raw = ""
-
-            # A truncated reply (finish_reason MAX_TOKENS) or a blocked/empty
-            # body leaves partial JSON that fails to parse. Reject anything that
-          

@@ -7,8 +7,9 @@ target_json/
 adapters/**/extract_json/
 adapters/**/target_json/
 
-# Generated NoBid heuristics — rebuilt each run by analyzer.maintain_nobids
+# Generated decision heuristics — rebuilt each run by analyzer.maintain_knowledge
 analyzer/knowledge/nobid_patterns.md
+analyzer/knowledge/bid_patterns.md
 
 # Logs
 *.log
