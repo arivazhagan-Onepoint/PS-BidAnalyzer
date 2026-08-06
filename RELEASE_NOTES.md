@@ -6,6 +6,15 @@
 
 **Bid-side knowledge collection + email summary refinements.**
 
+### Tracker is the source of truth for the collection tabs
+- `sync_matching_to_tab()` now rewrites a tender present in both the tracker and its tab **from the tracker**, instead of letting the tab's existing copy win the de-duplication. Previously a value edited directly in `PS Bids` / `PS NoBids` shadowed the tracker's permanently — by accident of the add-existing-first ordering, not by design. Reasons are authored in the tracker; the tabs are a derived view.
+- This cuts both ways: a reason typed only into a tab is now replaced by the tracker's blank. Existing row order is preserved and tab rows whose tender no longer matches the status are still kept as history. The log reports `added N, refreshed N from the tracker, N tab-only row(s) kept, N duplicate(s) collapsed`.
+
+### Pinned imperative phrasing in distillation
+- Each `KNOWLEDGE_SOURCES` entry now carries a `verb` (`Decline` / `Pursue`) and the distillation prompt requires every generated bullet to open with it.
+- Rationale: the distilled file is written by one LLM call and read by the scoring call, so its grammatical form is part of the analyzer's behaviour. Measured on the same rules and tender, `"Decline tenders that…"` scored 0-10, `"Onepoint has tended not to pursue…"` 10-15, and `"Give low priority to tenders with…"` 15 — the last reaching 75 on a borderline tender, one point below the Bid threshold. Gemini had been choosing imperatives unprompted (15/15 bullets over 5 regenerations), but nothing guaranteed it; a change of examples or model could silently soften every future regeneration with nothing in the log to show it.
+- Verified at 15/15 `Decline` and 5/5 `Pursue` over 5 regenerations each. The NoBid output is unchanged in practice; the Bid side moves from `"Prioritize opportunities where…"` to `"Pursue tenders that…"`, which will only take effect once the Bid side clears `BID_MIN_EXAMPLES` and regenerates.
+
 ### Bid knowledge maintenance
 - `analyzer/maintain_nobids.py` is renamed **`analyzer/maintain_knowledge.py`** — it now maintains both polarities, so the old name was misleading. Update any scheduled job that invokes the module path.
 - Both maintenance steps are driven by a single `KNOWLEDGE_SOURCES` table in `analyzer/config.py`, so each polarity runs through identical code; adding a third is one table entry.

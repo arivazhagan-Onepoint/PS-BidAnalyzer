@@ -160,7 +160,7 @@ python -m analyzer.maintain_knowledge          # extract + distil (respects the 
 python -m analyzer.maintain_knowledge --force  # distil below the example minimums (testing only)
 ```
 
-1. **Extract** — copies every `NoBid(Human)` row into the `PS NoBids` tab and every `Bid(Human)` row into `PS Bids`, de-duplicated by ID / OCID / Direct URL / Name. Idempotent: repeat runs never pile up duplicates.
+1. **Extract** — copies every `NoBid(Human)` row into the `PS NoBids` tab and every `Bid(Human)` row into `PS Bids`, de-duplicated by ID / OCID / Direct URL / Name. Idempotent: repeat runs never pile up duplicates. **Write reasons in the tracker, not in these tabs** — a tender present in both is rewritten from the tracker on every sync, so a reason typed straight into a tab is overwritten (with a blank, if the tracker's cell is empty).
 2. **Distil** — consolidates each tab's `Bid Qualification Reason(Human)` notes into general decision heuristics (one Gemini call per polarity) → `analyzer/knowledge/nobid_patterns.md` and `bid_patterns.md`.
 
 Only human-set statuses are collected — never the analyzer's own `Bid(AI)`/`NoBid(AI)` — so the analyzer never learns from its own output. Each polarity needs a minimum number of distinct genuine reasons (5 for NoBid, 3 for Bid) before its file is regenerated; below that, the existing file is kept rather than overwritten with something distilled from too little evidence. `--force` bypasses the minimums but cannot conjure data — a source with zero reasons is still skipped.

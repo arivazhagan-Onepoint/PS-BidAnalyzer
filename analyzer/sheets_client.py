@@ -264,8 +264,15 @@ class SheetsClient:
         the source columns in any order. The tab's data region (row 2 down) is
         rewritten to the de-duplicated union of the rows already present and the
         freshly-matched source rows, keyed by ID (falling back to OCID / Direct
-        URL / Name). Rows already in the tab are preserved; exact duplicates
-        collapse to one. Returns the number of data rows in the tab after sync.
+        URL / Name); exact duplicates collapse to one.
+
+        **The main sheet wins.** A tender present in both is written from the
+        tracker, overwriting whatever the tab held — including with a blank, if
+        that is what the tracker says. Reasons and every other field are authored
+        in the tracker; the tab is a derived view, so an edit made there does not
+        survive the next sync. Rows in the tab whose tender no longer matches
+        ``status_value`` are kept (they are history), and existing row order is
+        preserved. Returns the number of data rows in the tab after sync.
         """
         # 1. Target header row (row 1) -> column layout.
         header_res = self._execute_with_retry(
@@ -310,21 +317,47 @@ class SheetsClient:
             if (t.data.get(STATUS_FIELD, "") or "").strip() == status_value
         ]
 
-        # 4. De-duplicated union: existing rows first (preserve order, collapse
-        #    dupes), then any freshly-matched source row not already present.
+        # 4. De-duplicated union, with the MAIN SHEET AS THE SOURCE OF TRUTH.
+        #    A tender present in both is written from the tracker, overwriting the
+        #    tab's copy — so an edit made in the tab (or a value that has since
+        #    changed upstream) can never shadow the tracker's. Note this cuts both
+        #    ways: a reason typed only into the tab is replaced by the tracker's
+        #    blank, which is the intended behaviour — reasons are authored in the
+        #    tracker.
+        #    Existing tab order is preserved, and a tab row whose tender no longer
+        #    matches the status is kept rather than dropped (it is history).
+        def normalise(values: list) -> list:
+            """Pad/trim a row to the target header width so rows compare fairly."""
+            return [(values[i] if i < len(values) else "") or "" for i in range(len(target_headers))]
+
+        source_by_key = {}
+        for t in matching:
+            values = normalise([t.data.get(h, "") for h in target_headers])
+            source_by_key.setdefault(row_key(values), values)
+
         seen, final_rows = set(), []
-
-        def add(values: list) -> bool:
-            key = row_key(values)
+        refreshed = kept = collapsed = 0
+        for row in existing_rows:
+            key = row_key(row)
             if key in seen:
-                return False
+                collapsed += 1      # duplicate already in the tab
+                continue
             seen.add(key)
-            final_rows.append(values)
-            return True
+            tracker_row = source_by_key.get(key)
+            if tracker_row is None:
+                final_rows.append(row)          # no longer matches the status
+                kept += 1
+                continue
+            final_rows.append(tracker_row)      # tracker wins
+            if tracker_row != normalise(row):
+                refreshed += 1
 
-        kept = sum(1 for r in existing_rows if add(r))
-        removed = len(existing_rows) - kept
-        added = sum(1 for t in matching if add([t.data.get(h, "") for h in target_headers]))
+        added = 0
+        for key, values in source_by_key.items():
+            if key not in seen:
+                seen.add(key)
+                final_rows.append(values)
+                added += 1
 
         # 5. Rewrite the data region: clear below the header, then write the set.
         self._execute_with_retry(
@@ -344,7 +377,8 @@ class SheetsClient:
             )
         logger.info(
             f"Synced '{tab_name}' for {STATUS_FIELD} == '{status_value}': "
-            f"{len(final_rows)} row(s) total (added {added}, removed {removed} duplicate(s))"
+            f"{len(final_rows)} row(s) total (added {added}, refreshed {refreshed} from the "
+            f"tracker, {kept} tab-only row(s) kept, {collapsed} duplicate(s) collapsed)"
         )
         return len(final_rows)
 

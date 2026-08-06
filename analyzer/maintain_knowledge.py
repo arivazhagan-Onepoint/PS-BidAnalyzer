@@ -102,8 +102,14 @@ def _distill(examples: list, source: dict) -> str:
 Consolidate these into a SHORT markdown bullet list of {source['directive']}.
 Group similar reasons together, deduplicate, and ignore any placeholder or test
 entries. Each bullet must be a GENERAL rule useful for judging future tenders —
-not a restatement of a single tender. Output ONLY the markdown bullet list, with no
-preamble or closing commentary."""
+not a restatement of a single tender.
+
+Phrase every bullet as a direct instruction to the analyst, beginning with the word
+"{source['verb']}" — a rule to apply, not a description of what Onepoint has tended
+to do. A bullet may carry a short bold label first (e.g. "**Scope of Services:**"),
+but the instruction that follows it must start with "{source['verb']}".
+
+Output ONLY the markdown bullet list, with no preamble or closing commentary."""
 
     response = get_client().models.generate_content(
         model=ANALYZER_MODEL,

@@ -148,8 +148,8 @@ A separate, scheduled maintenance flow — `analyzer/maintain_knowledge.py`, run
 
 Both steps iterate the `KNOWLEDGE_SOURCES` table in `analyzer/config.py`, so each polarity runs through identical code — adding a third is one table entry:
 
-- **Step 1 — extract:** over a single read of the sheet, sync each human-decision status into its own tab — `NoBid(Human)` → **PS NoBids** and `Bid(Human)` → **PS Bids** (deduped by ID / OCID / Direct URL / Name).
-- **Step 2 — distil:** consolidate each tab's human `Bid Qualification Reason(Human)` notes into general decision heuristics via **one Gemini call per polarity**, written to that source's file — `knowledge/nobid_patterns.md` and `knowledge/bid_patterns.md`.
+- **Step 1 — extract:** over a single read of the sheet, sync each human-decision status into its own tab — `NoBid(Human)` → **PS NoBids** and `Bid(Human)` → **PS Bids** (deduped by ID / OCID / Direct URL / Name). **The tracker wins:** a tender present in both is rewritten from the main sheet, so reasons are authored there and an edit made directly in a tab is replaced on the next sync. Tab rows whose tender no longer matches the status are kept as history.
+- **Step 2 — distil:** consolidate each tab's human `Bid Qualification Reason(Human)` notes into general decision heuristics via **one Gemini call per polarity**, written to that source's file — `knowledge/nobid_patterns.md` and `knowledge/bid_patterns.md`. Every generated bullet is required to open with that source's pinned `verb` (`Decline` / `Pursue`), because the imperative form is worth 10-15 score points to the analyzer versus a descriptive one — see `KNOWLEDGE_SOURCES` in `analyzer/config.py`.
 
 | Polarity | Status | Tab | Artifact | Minimum examples |
 |---|---|---|---|---|

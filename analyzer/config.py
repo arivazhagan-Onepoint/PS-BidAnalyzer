@@ -139,6 +139,23 @@ BID_MIN_EXAMPLES   = 3
 # here extends extraction AND distillation with no further code changes.
 #   decision  : how the human decision reads in the distillation prompt
 #   directive : what the model should produce from those reasons
+#   verb      : the imperative each generated bullet must open with (see below)
+#
+# Why `verb` exists. The distilled file is written by one LLM call and read by
+# another (the per-tender scoring call), so its GRAMMATICAL FORM is part of the
+# analyzer's behaviour, not cosmetic. Measured on 2026-08-05, same rules and same
+# tender, varying only the lead phrase:
+#     "Decline tenders that mandate SC clearance…"     -> score 0-10
+#     "Onepoint has tended not to pursue tenders…"     -> score 10-15
+#     "Give low priority to tenders with…"             -> score 15 (75 on a
+#         borderline tender — one point below the Bid threshold)
+# An imperative reads as a constraint; a description reads as a tendency the model
+# may trade off. Gemini chose imperatives unprompted (15/15 bullets over 5
+# regenerations), but nothing guaranteed it: a change of examples or model could
+# silently soften every future regeneration, weakening suppression across every
+# tender scored afterwards with nothing in the log to show it. Pinning the verb
+# makes the strength of the precedent a property of this config rather than a
+# lucky default.
 KNOWLEDGE_SOURCES = (
     {
         "polarity":      "NoBid",
@@ -148,6 +165,7 @@ KNOWLEDGE_SOURCES = (
         "min_examples":  NOBID_MIN_EXAMPLES,
         "title":         "Onepoint NoBid Decision Heuristics",
         "decision":      "decided NOT to bid on",
+        "verb":          "Decline",
         "directive": (
             "general NoBid decision heuristics: the recurring patterns and criteria "
             "that explain why Onepoint declines tenders"
@@ -161,6 +179,7 @@ KNOWLEDGE_SOURCES = (
         "min_examples":  BID_MIN_EXAMPLES,
         "title":         "Onepoint Bid Decision Heuristics",
         "decision":      "decided TO bid on",
+        "verb":          "Pursue",
         "directive": (
             "general Bid decision heuristics: the recurring patterns and criteria "
             "that explain why Onepoint pursues tenders. These describe commercial "

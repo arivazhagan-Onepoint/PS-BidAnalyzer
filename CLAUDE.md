@@ -99,7 +99,10 @@ polarity runs through identical code:
 1. **Extract** — one read of the sheet, then `sync_matching_to_tab()` per source:
    `NoBid(Human)` → `PS NoBids`, `Bid(Human)` → `PS Bids`. Deduped by ID / OCID /
    Direct URL / Name; idempotent. Columns are matched to each tab's row-1 header
-   **by name**; a header-less tab is skipped with a warning.
+   **by name**; a header-less tab is skipped with a warning. **The tracker is the
+   source of truth** — a tender in both is rewritten from the tracker, including
+   with a blank, so an edit made in a tab does not survive the next sync. Tab rows
+   whose tender no longer matches the status are kept as history.
 2. **Distil** — one Gemini call per source, consolidating that tab's
    `Bid Qualification Reason(Human)` notes into general heuristics →
    `knowledge/nobid_patterns.md` and `knowledge/bid_patterns.md` (both gitignored).
@@ -119,6 +122,13 @@ Invariants worth preserving when changing this code:
   as decision precedent, never merged into the capability context. Capability is
   judged only from `onepoint_capabilities.md`, which is hand-authored and tracked in
   git — no generated content may overwrite it.
+- **Phrasing is behaviour, not cosmetics.** Each source pins a `verb` (`Decline` /
+  `Pursue`) that the distillation prompt requires every generated bullet to open
+  with. An imperative reads to the scoring call as a constraint; a description reads
+  as a tendency it may trade off — measured at 10-15 score points on the same rules
+  (see the note above `KNOWLEDGE_SOURCES`). Don't relax these to softer forms like
+  "Give low priority to…", which measured *weaker* than plain description and put a
+  blocked tender one point below the Bid threshold.
 
 Both artifacts are injected into the analysis prompt. `analyzer/patterns.py` loads
 each (one path-keyed cache, `load_nobid_patterns()` / `load_bid_patterns()`),
