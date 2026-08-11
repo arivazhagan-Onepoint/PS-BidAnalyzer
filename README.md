@@ -1,6 +1,6 @@
 # PS BidAnalyzer Tool
 
-An LLM-based **bid qualification** tool for Onepoint. It reads tenders from the shared **PS Tender Tracker** Google Sheet, scores each tender's fit against Onepoint's documented capabilities using an OpenRouter-hosted model, and writes back a **Bid / NoBid / TBD** qualification with a system-generated reason.
+An LLM-based **bid qualification** tool for Onepoint. It reads tenders from the shared **PS Tender Tracker** Google Sheet, scores each tender's fit against Onepoint's documented capabilities using Google's **Gemini** model, and writes back a **Bid / NoBid / TBD** qualification with a system-generated reason.
 
 **Lead:** PS Team
 
@@ -10,10 +10,11 @@ An LLM-based **bid qualification** tool for Onepoint. It reads tenders from the 
 
 For every qualifying tender in the sheet, the analyzer:
 
-1. Sends the tender **title** + **description** to a Tender Analyst model, grounded strictly on Onepoint's capability context.
+1. Sends the tender **title** + **description** to a Tender Analyst model, grounded strictly on Onepoint's capability context (plus distilled Bid/NoBid decision precedent, if present).
 2. Gets back an overall fit **score out of 100** and a short justification.
 3. Maps the score to a qualification — **Bid (> 75)**, **TBD (51–75)**, or **NoBid (≤ 50)**.
 4. Writes the qualification, reason, and date back to the sheet, appends a timestamped audit comment, and colours the row.
+5. Sends one HTML **summary email** for the run (success / completed-with-errors / failure).
 
 It only touches rows the automated pipeline has flagged for analysis, so human decisions in the sheet are never overwritten.
 
@@ -32,14 +33,17 @@ project_config.json ──▶ SheetsClient.read_tenders()      (Google service a
                               │   (skips manual overrides & already-analysed rows)
                               ▼
                      analyze_tender(title, description)
-                              │   OpenRouter · Gemini · Onepoint capability context
-                              │   retries on transient upstream errors
+                              │   Gemini (native google-genai SDK) · Onepoint capability
+                              │   context · distilled Bid/NoBid precedent
+                              │   retries transient/incomplete replies; NO fallback provider
                               ▼
              score 0-100 ──▶ Bid (>75) / TBD (51-75) / NoBid (≤50)
                               ▼
                    SheetsClient.write_qualifications() + row colour
-   updates: [Bid Qualification] [Bid Qualification Reason] [Bid Qualification Date]
+   updates: [Bid Qualification] [Bid Qualification Reason(System)] [Bid Qualification Date]
             [Comments] [Processed Date] [Last Modified Date] [Created Date]
+                              ▼
+                   notifier.send_alert() — one HTML summary email
 ```
 
 ---
@@ -47,21 +51,29 @@ project_config.json ──▶ SheetsClient.read_tenders()      (Google service a
 ## Project structure
 
 ```
-config.py                         Shared config — column schema, sheet/folder, credentials paths
-project_config.json               Sheet name, Drive folder ID, environment
+config.py                         Shared config — column schema, sheet/folder, credential paths, NOTIFICATIONS
+project_config.json               Sheet name, Drive folder ID, environment, notifications block
 requirements.txt                  Python dependencies
+notifier.py                       Stdlib SMTP email transport (send_alert)
 credentials/
   service_account.json            Google service account key (you provide)
-  openrouter_credentials.json     { "openrouter_api_key": "..." } (you provide)
+  gemini_credentials.json         { "gemini_api_key": "..." } — active provider (you provide)
+  openrouter_credentials.json     { "openrouter_api_key": "..." } — backup, unused (optional)
+  smtp_credentials.json           { "username": "...", "password": "..." } — only if the relay needs auth
 analyzer/
-  main.py                         Entry point — read sheet → analyse → write back
+  main.py                         Entry point — read sheet → analyse → write back → email
   analyzer.py                     Core analyze_tender(); prompt + score → qualification
-  openrouter_client.py            OpenRouter/OpenAI client wrapper
+  gemini_client.py                Native Gemini client wrapper (active provider)
+  openrouter_client.py            OpenRouter/OpenAI client wrapper (backup, unused)
   onepoint_context.py             Loads the Onepoint capability context
+  patterns.py                     Loads the distilled Bid/NoBid precedent (optional, cached)
+  maintain_knowledge.py           Standalone bid-knowledge maintenance (extract + distil)
   sheets_client.py                Google Sheets read/write + row colouring
   config.py                       Analyzer settings (model, thresholds, retries, window)
   knowledge/
     onepoint_capabilities.md      Capability context injected into the prompt (you populate)
+    nobid_patterns.md             Distilled NoBid heuristics (generated by maintenance; gitignored)
+    bid_patterns.md               Distilled Bid heuristics (generated by maintenance; gitignored)
 ```
 
 ---
@@ -75,8 +87,8 @@ pip install -r requirements.txt
 
 **2. Set up credentials and config** — see [SETUP.md](SETUP.md) for full instructions:
 - `credentials/service_account.json` (Google service account with access to the sheet's Drive folder)
-- `credentials/openrouter_credentials.json` containing `{"openrouter_api_key": "..."}`
-- `project_config.json` pointing at the correct Drive folder + sheet name
+- `credentials/gemini_credentials.json` containing `{"gemini_api_key": "..."}`
+- `project_config.json` pointing at the correct Drive folder + sheet name, with a `notifications` block
 - `analyzer/knowledge/onepoint_capabilities.md` populated with Onepoint's capabilities
 
 **3. Run the analyzer**
@@ -120,7 +132,7 @@ Score thresholds (`score_to_qualification` in `analyzer/config.py`):
 | 51–75 | **TBD**   | `TBD(AI)`   | yellow |
 | ≤ 50  | **NoBid** | `NoBid(AI)` | red    |
 
-On empty input or an unrecoverable API failure, the analyzer records a deterministic `NoBid(AI)` with a reason explaining why, so every processed row always gets a result.
+On empty input or an unrecoverable Gemini failure, the analyzer records a deterministic `NoBid(AI)` with a reason explaining why, so every processed row always gets a result.
 
 ---
 
@@ -130,10 +142,64 @@ Scoring is grounded **only** on `analyzer/knowledge/onepoint_capabilities.md`. T
 
 ---
 
+## Bid knowledge (maintenance)
+
+A separate, scheduled maintenance flow — `analyzer/maintain_knowledge.py`, run standalone — collects the team's manual bid decisions and distils them into reusable heuristics that feed back into scoring. It is **decoupled** from the per-tender analysis and runs on its own cadence:
+
+Both steps iterate the `KNOWLEDGE_SOURCES` table in `analyzer/config.py`, so each polarity runs through identical code — adding a third is one table entry:
+
+- **Step 1 — extract:** over a single read of the sheet, sync each human-decision status into its own tab — `NoBid(Human)` → **PS NoBids** and `Bid(Human)` → **PS Bids** (deduped by ID / OCID / Direct URL / Name). **The tracker wins:** a tender present in both is rewritten from the main sheet, so reasons are authored there and an edit made directly in a tab is replaced on the next sync. Tab rows whose tender no longer matches the status are kept as history.
+- **Step 2 — distil:** consolidate each tab's human `Bid Qualification Reason(Human)` notes into general decision heuristics via **one Gemini call per polarity**, written to that source's file — `knowledge/nobid_patterns.md` and `knowledge/bid_patterns.md`. Every generated bullet is required to open with that source's pinned `verb` (`Decline` / `Pursue`), because the imperative form is worth 10-15 score points to the analyzer versus a descriptive one — see `KNOWLEDGE_SOURCES` in `analyzer/config.py`.
+
+| Polarity | Status | Tab | Artifact | Minimum examples |
+|---|---|---|---|---|
+| NoBid | `NoBid(Human)` | PS NoBids | `knowledge/nobid_patterns.md` | `NOBID_MIN_EXAMPLES` (5) |
+| Bid | `Bid(Human)` | PS Bids | `knowledge/bid_patterns.md` | `BID_MIN_EXAMPLES` (3) |
+
+Every source is **independent**: its own guard, its own LLM call, its own file, its own error handling. One polarity failing or lacking data never touches the other's artifact. The Bid minimum is lower because human Bid decisions are rarer than rejections.
+
+**Guards.** Regeneration is skipped for a source (its existing file kept) unless it has ≥ its own minimum distinct genuine reasons; `test`/placeholder junk is filtered out first. `--force` bypasses the minimum for **every** source — but a source with **zero** genuine reasons is still skipped even under `--force`, because there is nothing to send the model and a regeneration attempt would invent heuristics from no evidence.
+
+> Distilling a company-wide rule from one or two thin notes produces confident-sounding nonsense — that is exactly what the minimums exist to prevent. Treat `--force` as a testing tool, not a way to get output sooner.
+
+Only human-set values feed these tabs — never the analyzer's own `NoBid(AI)`/`Bid(AI)` — to avoid a self-reinforcing feedback loop.
+
+**What reaches the analyzer.** Both artifacts, injected by `analyzer/patterns.py` as **separate, fenced precedent blocks** — NoBid heuristics instruct the model to calibrate the score **DOWN** on a match, Bid heuristics to calibrate it **UP**. Each block is omitted entirely when its file is absent or empty, so deleting a file cleanly disables that direction. Both blocks state explicitly that they are *not* a capability source: capability is judged only from the capability context, which matters most for the Bid side, where "we pursued this before" is evidence of commercial appetite rather than of what Onepoint can deliver.
+
+> ⚠️ **No conflict rule yet.** A tender matching both a Decline and a Pursue heuristic is resolved however the model happens to weigh them on that call, so its qualification can vary between runs. If that matters, the fix is one line in the prompt making documented blockers (geography, clearance, out-of-scope) win over appetite.
+
+```bash
+python -m analyzer.maintain_knowledge          # extract + distil (guarded)
+python -m analyzer.maintain_knowledge --force  # regenerate even below the example minimums
+```
+
+---
+
 ## Model & resilience
 
-- **Model:** `ANALYZER_MODEL` in `analyzer/config.py` (default `google/gemini-2.5-flash`), via OpenRouter. `Requirements.md` specifies `google/gemini-3.5-flash`; change `ANALYZER_MODEL` in one place if/when that model is available on your account.
-- **Transient-error handling:** OpenRouter occasionally returns HTTP 200 with `finish_reason` = `error` or `length` and a truncated body that fails JSON parsing. The analyzer detects this, rejects the incomplete response, and retries up to `ANALYZER_MAX_RETRIES` times (default 3, spaced by `API_THROTTLE_SECONDS`) before falling back to `NoBid(AI)`.
+- **Provider:** Google **Gemini** via the native `google-genai` SDK (`analyzer/gemini_client.py`). Model is `GEMINI_MODEL` in `analyzer/config.py` (default `gemini-3.1-flash-lite`; `ANALYZER_MODEL` aliases it).
+- **Thinking disabled:** `ANALYZER_THINKING_BUDGET = 0`. Gemini 3.x draw reasoning tokens from the output budget, which can consume the whole budget before any JSON is emitted; disabling thinking keeps replies cheap and fully formed for this short scoring task.
+- **No fallback:** there is intentionally **no** runtime fallback provider. If Gemini fails, the tender is recorded as `NoBid(AI)` pending manual review. The OpenRouter wrapper (`analyzer/openrouter_client.py`) and its `OPENROUTER_*` settings are retained only as a backup/reference and are not imported by the active path.
+- **Transient-error handling:** an empty, truncated, or unparseable reply is rejected and retried up to `ANALYZER_MAX_RETRIES` times (default 3, spaced by `API_THROTTLE_SECONDS`) before falling back to `NoBid(AI)`.
+
+---
+
+## Email notifications
+
+Every run sends exactly one HTML summary email, colour-coded by outcome:
+
+- ✅ **SUCCESS** (green) — run completed with zero row errors.
+- ⚠️ **COMPLETED WITH ERRORS** (amber) — run finished but ≥ 1 row hit an analyzer error.
+- ❌ **FAILURE** (red) — the run aborted with an exception; the email embeds the traceback and the process still exits non-zero (so schedulers register it).
+
+The body reports environment, start/finish times and the one-day window date, then two tables either side of a link to the PS Tender Tracker sheet:
+
+- **Overall Summary** — sheet-wide **Bid** and **TBD** totals across every row in the tracker (not just this run), rolled up by family so `Bid(AI)`, `Bid(Human)` and bare `Bid` count together, plus a **Tenders Needing your Attention** total. Reflects the sheet as it stands *after* the run's write-back, and costs no extra API call — it's counted off the rows already read. Omitted on a fatal error rather than reported as 0.
+- **Bid Analysis - This Run** — the per-run metrics (Analysed / Bid / TBD / NoBid / Skipped / Out of window / Errors).
+
+The sheet-wide figures are also logged, so a run is auditable without opening the email.
+
+Configuration lives in the `notifications` block of `project_config.json` (exposed as `config.NOTIFICATIONS`); set `"enabled": false` to disable alerts. SMTP auth, if the relay needs it, is read from `credentials/smtp_credentials.json` (omit the file for an unauthenticated internal relay). `notifier.send_alert()` never raises — a broken mailer will not bring down an analysis run.
 
 ---
 
@@ -142,7 +208,7 @@ Scoring is grounded **only** on `analyzer/knowledge/onepoint_capabilities.md`. T
 - **Auth:** Google **service account** (`credentials/service_account.json`). Share the target Drive folder / sheet with the service account's email.
 - **Sheet layout:** row 1 = summary, row 2 = headers, row 3+ = tender data. The tool locates the sheet by name in the configured folder — it does **not** create it, so the sheet must already exist and be populated.
 - **Reads:** `Name` (title) and `Tender Description`, plus the status and date columns used for filtering.
-- **Writes:** `Bid Qualification`, `Bid Qualification Reason`, `Bid Qualification Date`, `Comments` (appends a timestamped entry), `Processed Date`, `Last Modified Date`, `Created Date`.
+- **Writes:** `Bid Qualification`; `Bid Qualification Reason(System)` (the dated reason is **prepended**, newest first, with prior runs kept below); `Bid Qualification Date`; `Comments` (appends a timestamped entry); `Processed Date`; `Last Modified Date`; `Created Date`. `Bid Qualification Reason(Human)` is **never** written, so manual notes are preserved.
 - **Rate limits:** Sheets/Drive calls retry with exponential backoff + jitter (up to 6 attempts, capped at 120 s).
 
 ---
@@ -151,9 +217,10 @@ Scoring is grounded **only** on `analyzer/knowledge/onepoint_capabilities.md`. T
 
 | Setting | Default | Purpose |
 |---------|---------|---------|
-| `ANALYZER_MODEL` | `google/gemini-2.5-flash` | OpenRouter model used for scoring |
+| `GEMINI_MODEL` / `ANALYZER_MODEL` | `gemini-3.1-flash-lite` | Native Gemini model used for scoring |
 | `ANALYZER_TEMPERATURE` | `0.2` | Sampling temperature |
-| `ANALYZER_MAX_TOKENS` | `700` | Max completion tokens |
+| `ANALYZER_MAX_TOKENS` | `700` | Max output tokens |
+| `ANALYZER_THINKING_BUDGET` | `0` | Gemini thinking budget (disabled for reliable JSON) |
 | `ANALYZER_MAX_RETRIES` | `3` | Retries on transient/incomplete responses |
 | `API_THROTTLE_SECONDS` | `10` | Delay between API calls / retries |
 | `BID_THRESHOLD` | `75` | Score strictly above → Bid |
@@ -161,8 +228,15 @@ Scoring is grounded **only** on `analyzer/knowledge/onepoint_capabilities.md`. T
 | `PROCESS_STATUSES` | `{PreQualified, ReCheck}` | Which statuses are analysed |
 | `WINDOW_DATE_FIELD` | `Last Modified Date` | Column anchoring the one-day window |
 | `ONEPOINT_CONTEXT_FILE` | `knowledge/onepoint_capabilities.md` | Capability context path |
+| `NOBID_PATTERNS_FILE` | `knowledge/nobid_patterns.md` | Distilled NoBid precedent (optional; injected) |
+| `BID_PATTERNS_FILE` | `knowledge/bid_patterns.md` | Distilled Bid precedent (optional; injected) |
+| `NOBID_MIN_EXAMPLES` | `5` | Min distinct genuine NoBid reasons before Step 2 regenerates |
+| `BID_MIN_EXAMPLES` | `3` | Min distinct genuine Bid reasons before Step 2 regenerates |
+| `JUNK_MARKERS` | `("test",)` | Reasons containing these are treated as placeholder junk |
+| `DISTILL_MAX_TOKENS` | `3000` | Output budget for a distillation call (both polarities) |
+| `DISTILL_TEMPERATURE` | `0.3` | Sampling temperature for distillation |
 
-Sheet name, Drive folder ID, and environment live in `project_config.json` (read by the root `config.py`).
+Sheet name, Drive folder ID, environment, and the `notifications` block live in `project_config.json` (read by the root `config.py`).
 
 ---
 
@@ -177,9 +251,11 @@ The run logs to the console and to `analyzer/analyzer.log`. Each run ends with a
 | Symptom | Likely cause / fix |
 |---------|--------------------|
 | `Sheet '…' not found in folder …` | The sheet doesn't exist in the configured folder, or the service account can't see it. Check `project_config.json` and share the folder/sheet with the service account email. |
-| `openrouter_api_key is not set …` | `credentials/openrouter_credentials.json` is missing the `openrouter_api_key` field. |
+| `gemini_api_key is not set …` | `credentials/gemini_credentials.json` is missing the `gemini_api_key` field. |
+| `404 NOT_FOUND … model … no longer available` | The `GEMINI_MODEL` in `analyzer/config.py` isn't available on your key. Pick an available model (e.g. `gemini-3.1-flash-lite`). |
 | All scores low / "NO company context" warning | `analyzer/knowledge/onepoint_capabilities.md` is missing or empty — populate it. |
-| `Analyzer failed … after N attempts` | The model kept returning incomplete/transient responses; the row is recorded as `NoBid(AI)` for manual review. Re-run later. |
+| `Analyzer failed … after N attempts` | Gemini kept returning incomplete/transient responses; the row is recorded as `NoBid(AI)` for manual review. Re-run later. |
 | `HttpError 403/429` | Sheets/Drive rate limit — the tool retries automatically with backoff. |
+| No summary email arrives | Check the `notifications` block in `project_config.json` (`enabled`, host/port), and `credentials/smtp_credentials.json` if the relay needs auth. `send_alert()` never raises, so failures are logged, not fatal. |
 
 See [SETUP.md](SETUP.md) for installation and first-run instructions.
