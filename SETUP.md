@@ -128,8 +128,7 @@ Columns are matched to that header **by name**, so the tab may hold any subset o
 
 ```bash
 # From the project root:
-python -m analyzer.main                     # analyse today's window (UK time)
-python -m analyzer.main --date 2026-07-03   # analyse a specific day (backfill / rerun)
+python -m analyzer.main                     # analyse every PreQualified/ReCheck row
 python -m analyzer.main --limit 5           # cap to the first 5 qualifying rows (quick test)
 ```
 
@@ -137,7 +136,7 @@ python -m analyzer.main --limit 5           # cap to the first 5 qualifying rows
 
 1. Authenticates with the service account and opens the **PS Tender Tracker** sheet.
 2. Reads all tender rows.
-3. Selects rows whose `Bid Qualification` is `PreQualified` or `ReCheck` **and** whose `Last Modified Date` falls in the target one-day window.
+3. Selects rows whose `Bid Qualification` is `PreQualified` or `ReCheck` — the analyzer's only entry point. There is no date filter, so rows of any age are picked up, and everything else is dropped before the processing loop.
 4. Scores each selected tender against the Onepoint capability context (with automatic retries on transient Gemini errors).
 5. Writes back `Bid Qualification` (`Bid(AI)` / `TBD(AI)` / `NoBid(AI)`), the reason, the date, an appended `Comments` entry, and the control columns; colours each changed row (white / yellow / red).
 6. Logs an end-of-run summary.
@@ -212,6 +211,7 @@ PS BidAnalyzer Tool/
 | `gemini_api_key is not set …` | `credentials/gemini_credentials.json` is missing or lacks the `gemini_api_key` field (Step 3). |
 | `404 NOT_FOUND … model … no longer available` | The `GEMINI_MODEL` in `analyzer/config.py` isn't available on your key. Pick an available model (e.g. `gemini-3.1-flash-lite`, `gemini-3.5-flash`). |
 | "Analysis will proceed with NO company context" warning | `analyzer/knowledge/onepoint_capabilities.md` is missing or empty (Step 4). |
-| `Analyzer failed … after N attempts` | The model kept returning incomplete/transient responses; the row is marked `NoBid(AI)` for manual review. Re-run later. |
+| `Analyzer failed … after N attempts` | The model kept returning incomplete/transient responses; the row is marked `TBD(AI)` (never scored) for manual review. Set it back to `ReCheck` to have the analyzer retry it. |
 | `HttpError 403/429` | Sheets/Drive API rate limit — the tool retries automatically with backoff. |
-| Nothing analysed / all "Out of window" | No rows have `Last Modified Date` on the target day. Use `--date YYYY-MM-DD` to target the right day. |
+| Nothing analysed / "0 of N rows are PreQualified/ReCheck" | No row is awaiting qualification — every row already carries a Bid/TBD/NoBid or a human status. Set a row to `ReCheck` to have it re-analysed. |
+| A run processes far more rows than expected | There is no date filter, so the first run after a gap drains the whole backlog (~1.5 s per row, but every row costs tokens). Use `--limit N` to work through it in batches. |

@@ -22,7 +22,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **LLM (backup, not used):** **OpenRouter** via the `openai` SDK. The wrapper
   (`analyzer/openrouter_client.py`) and its `OPENROUTER_*` settings are retained
   for reference only; nothing in the active path imports them. There is **no
-  runtime fallback** — if Gemini fails, the tender is recorded as `NoBid(AI)`.
+  runtime fallback** — if Gemini fails, the tender is recorded as `TBD(AI)`.
 - **Google Sheets/Drive:** `google-api-python-client` + `google-auth` (service-account auth).
 - **Email alerts:** Python standard library only (`smtplib` + `email`) via
   `notifier.py`; no extra dependency. Each run sends one HTML summary email.
@@ -35,8 +35,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt
 
 # From the project root:
-python -m analyzer.main                     # analyse today's window (UK time)
-python -m analyzer.main --date 2026-07-03   # analyse a specific day (backfill / rerun)
+python -m analyzer.main                     # analyse every PreQualified/ReCheck row
 python -m analyzer.main --limit 5           # cap to the first 5 qualifying rows (quick test)
 
 # Knowledge maintenance — separate cadence, NOT per analysis run:
@@ -67,15 +66,24 @@ See `SETUP.md` for the full step-by-step (service account, sheet sharing, etc.).
 Entry point is `analyzer/main.py`, which orchestrates one run:
 
 1. `sheets_client.py` — opens the sheet (service-account auth) and reads tender rows.
-2. Row selection — only rows whose `Bid Qualification` is `PreQualified`/`ReCheck`
-   **and** whose `Last Modified Date` falls in the target one-day window are analysed
-   (skips manual overrides and already-processed rows).
+2. Row selection — `Bid Qualification` in `PreQualified`/`ReCheck` is the analyzer's
+   **single entry point**, applied once before the loop (`should_analyse()`), so
+   manual overrides and already-qualified rows are dropped there and never reach
+   the loop, the model, or the per-row log. **There is no date filter** — a row
+   stays in scope until it has a qualification, so one missed by a failed or
+   skipped run is picked up by the next. Nothing bounds run size except `--limit`,
+   which is manual; see the note in `analyzer/config.py`.
 3. `analyzer.py` — `analyze_tender(title, description, nobid_patterns=…, bid_patterns=…)`
    builds a prompt from the Onepoint context (`onepoint_context.py`) plus the
    distilled decision precedent (`patterns.py`, loaded once per run in `main.py`),
    calls Gemini, and maps the returned score (0–100) to `Bid(AI)` / `TBD(AI)` /
    `NoBid(AI)` via thresholds in `config.py`. Retries transient/incomplete replies up
-   to `ANALYZER_MAX_RETRIES`; on total failure returns a deterministic `NoBid(AI)`.
+   to `ANALYZER_MAX_RETRIES`; on total failure returns a deterministic `TBD(AI)`
+   flagged with `analysis_failed=True` (never `NoBid(AI)` — the tender was never
+   scored, so NoBid would assert a judgement that was never made and bury the row;
+   TBD means undetermined and surfaces in the email's attention total). The flag
+   makes `main._build_row_update()` write "not scored — analysis failed" in place
+   of the placeholder `score 0/100`. Empty input still returns `NoBid(AI)`.
 4. Write-back — `main.py` writes `Bid Qualification`, prepends the dated reason
    to `Bid Qualification Reason(System)` (newest first; prior runs kept below),
    writes `Bid Qualification Date`, appends a `Comments` entry, updates the
@@ -86,8 +94,8 @@ Entry point is `analyzer/main.py`, which orchestrates one run:
 
 Config layering: root `config.py` holds shared settings (column schema, sheet/folder,
 credential paths, UK timezone, `NOTIFICATIONS`); `analyzer/config.py` re-exports those
-and adds the analyzer-specific settings (model, thresholds, retries, window, thinking
-budget).
+and adds the analyzer-specific settings (model, thresholds, retries, eligible
+statuses, thinking budget).
 
 ## Bid knowledge maintenance
 
@@ -160,8 +168,8 @@ Every run sends exactly one HTML summary email, colour-coded by outcome:
 - ❌ **FAILURE** (red) — the run aborted with an exception; the email embeds the
   traceback and the process still exits non-zero (so schedulers register it).
 
-The body reports environment, start/finish times, the one-day window date, then
-two tables:
+The body reports environment, start/finish times and the run's scope (every row
+awaiting qualification), then two tables:
 
 - **Overall Summary** — sheet-wide Bid and TBD totals across *every* row in the
   tracker (not just this run), rolled up by qualification family so `Bid(AI)`,
@@ -170,8 +178,10 @@ two tables:
   call — with this run's new qualifications substituted in so the totals reflect
   the sheet after write-back. Omitted entirely on a fatal error, where no totals
   were produced (better than showing a misleading 0).
-- **Bid Analysis - This Run** — the per-run metrics (Analysed / Bid / TBD / NoBid /
-  Skipped / Out of window / Errors).
+- **Bid Analysis - This Run** — the per-run metrics (Eligible / Analysed / Bid /
+  TBD / NoBid / Skipped / Errors). `Eligible` leads because it is the run's scope;
+  `Analysed` below it shows how much of that scope was got through, the two
+  differing when `--limit` is set or a row has no title/description.
 
 The sheet hyperlink sits between them. The sheet-wide figures are also written to
 the run log so a run is auditable without opening the email.
@@ -208,7 +218,7 @@ notifier in the upstream **PS-WebScrapper** module.
 | `analyzer/openrouter_client.py` | OpenRouter/OpenAI wrapper (backup, unused) |
 | `analyzer/onepoint_context.py` | Loads the Onepoint capability context |
 | `analyzer/sheets_client.py` | Google Sheets read/write + row colouring |
-| `analyzer/config.py` | Analyzer settings (provider/model, thresholds, retries, window) |
+| `analyzer/config.py` | Analyzer settings (provider/model, thresholds, retries, eligible statuses) |
 | `config.py` | Shared config — column schema, sheet/folder, credential paths, `NOTIFICATIONS` |
 | `notifier.py` | Stdlib SMTP email transport (`send_alert`); alert body built in `main.py` |
 

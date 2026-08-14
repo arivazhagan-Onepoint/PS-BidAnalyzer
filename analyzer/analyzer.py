@@ -27,6 +27,7 @@ from .config import (
     UK_TIMEZONE,
     score_to_qualification,
     QUALIFICATION_NOBID,
+    QUALIFICATION_TBD,
 )
 from .gemini_client import get_client
 from .onepoint_context import load_onepoint_context
@@ -47,6 +48,10 @@ class BidAnalysis:
     bid_qualification_reason: str   # system-generated summarised reason
     bid_qualification_date: str     # YYYY-MM-DD the qualification was arrived at
     score: float = 0.0              # raw analysis score 0-100 (kept for comments)
+    # True when the model never returned a usable score and the qualification is
+    # the deterministic fallback rather than a judgement. Callers use this to keep
+    # the fabricated 0.0 score out of anything user-facing (see main._build_row_update).
+    analysis_failed: bool = False
 
 
 _SYSTEM_PROMPT = (
@@ -114,9 +119,11 @@ def analyze_tender(title: str, description: str, run_date: datetime = None,
     ``nobid_patterns`` and ``bid_patterns`` are the optional distilled decision
     precedent (see analyzer.patterns); each is injected into the prompt as a
     secondary signal when provided — NoBid heuristics calibrate the score down,
-    Bid heuristics calibrate it up. On empty input or API failure, returns a NoBid
-    with a system-generated reason so the caller always records a deterministic
-    result.
+    Bid heuristics calibrate it up. The caller always gets a deterministic result:
+    empty input returns a NoBid (there is genuinely nothing to assess), while an
+    API failure returns a TBD flagged with ``analysis_failed`` — the model never
+    rendered a judgement, so recording NoBid would assert one that was never made
+    and bury the row (NoBid reads as decided; TBD surfaces it for a human).
     """
     if run_date is None:
         run_date = datetime.now(UK_TIMEZONE)
@@ -200,14 +207,25 @@ def analyze_tender(title: str, description: str, run_date: datetime = None,
             if attempt < ANALYZER_MAX_RETRIES:
                 time.sleep(API_THROTTLE_SECONDS)
 
-    # All retries exhausted — record a deterministic NoBid for manual review.
+    # All retries exhausted. Record TBD, NOT NoBid: the model never scored this
+    # tender, so a NoBid would assert a judgement that was never made — and since
+    # NoBid reads as decided, the row would be quietly buried. TBD carries the
+    # honest meaning (undetermined), and it is the qualification the run summary
+    # and the alert email surface under "Tenders Needing your Attention", so a
+    # provider outage or quota wall shows up instead of passing as a clean run.
     logger.error(f"Analyzer failed for title='{title[:60]}' after {ANALYZER_MAX_RETRIES} attempts: {last_error}")
     time.sleep(API_THROTTLE_SECONDS)
     return BidAnalysis(
-        bid_qualification=QUALIFICATION_NOBID,
-        bid_qualification_reason=f"Analysis could not be completed ({last_error}). Marked NoBid pending manual review.",
+        bid_qualification=QUALIFICATION_TBD,
+        bid_qualification_reason=(
+            f"Analysis could not be completed after {ANALYZER_MAX_RETRIES} attempts "
+            f"({last_error}). No score was produced — this is not an assessment of fit. "
+            f"Recorded as {QUALIFICATION_TBD} pending manual review; set the row back to "
+            f"'ReCheck' to have the analyzer retry it."
+        ),
         bid_qualification_date=date_str,
         score=0.0,
+        analysis_failed=True,
     )
 
 

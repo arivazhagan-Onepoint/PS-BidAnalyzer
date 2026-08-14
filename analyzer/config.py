@@ -53,10 +53,14 @@ ANALYZER_THINKING_BUDGET = 0
 
 # A model call can fail transiently (network blip, upstream 5xx, an empty or
 # truncated reply that fails JSON parsing). These are usually transient, so retry
-# the call a few times before giving up and falling back to NoBid.
+# the call a few times before giving up and falling back to TBD.
 ANALYZER_MAX_RETRIES = 3
 
-# Seconds to sleep after each API call to stay within provider rate limits.
+# Seconds to sleep between RETRY attempts, and once more before giving up — it is
+# a back-off after a failed call, NOT a throttle between successful ones. A
+# successful call is followed by no sleep at all (measured ~1.5 s per row end to
+# end on 2026-08-14), so raising this slows down failures only and has no effect
+# on the speed of a healthy run.
 API_THROTTLE_SECONDS = 10
 
 # --- OpenRouter model (BACKUP — kept for future reference, not used) ---------
@@ -223,25 +227,14 @@ def should_analyse(status: str) -> bool:
     return (status or "").strip().lower() in {s.lower() for s in PROCESS_STATUSES}
 
 
-# --- One-day window ---------------------------------------------------------
-# The analyzer only processes rows dated within a single day. The window is
-# anchored on this column. 'Last Modified Date' is used because the scraper
-# stamps it to the run time both for newly-created PreQualified rows and for
-# ReCheck rows it re-flags (whose Created Date is older) — so it captures every
-# row worth analysing on a given day. Change to 'Created Date', 'Published On',
-# etc. in one place if a different anchor is wanted.
-WINDOW_DATE_FIELD = "Last Modified Date"
-
-
-def in_day_window(cell_value: str, target_date: str) -> bool:
-    """True if the cell's date falls on target_date (a 'YYYY-MM-DD' string).
-
-    Tolerates both ISO timestamps ('2026-07-03T13:16:00+01:00') and plain dates
-    ('2026-07-03') by comparing only the leading date portion. Empty/unparseable
-    cells return False so undated rows are excluded from the window.
-    """
-    value = (cell_value or "").strip()
-    return len(value) >= 10 and value[:10] == target_date
+# --- No date filter ---------------------------------------------------------
+# The analyzer deliberately has no date window. Scope is PROCESS_STATUSES alone:
+# a row stays in scope until it has been given a qualification, so one missed by
+# a failed or skipped run is picked up by the next one instead of being stranded.
+# An earlier version filtered on a one-day window anchored to 'Last Modified
+# Date'; it was removed because any row the window excluded was excluded from
+# every future run too, with no sweep to recover it. Note that nothing now bounds
+# how many rows a single run processes — only --limit, which is manual.
 
 
 def score_to_qualification(score: float) -> str:

@@ -31,8 +31,6 @@ from .config import (
     STATUS_FIELD,
     PROCESS_STATUSES,
     should_analyse,
-    WINDOW_DATE_FIELD,
-    in_day_window,
     qualification_family,
 )
 from .analyzer import analyze_tender
@@ -73,9 +71,17 @@ def _build_row_update(tender, analysis, run_dt) -> dict:
     now_iso = run_dt.isoformat()
     ts = run_dt.strftime("%Y-%m-%d %H:%M")
 
+    # A failed analysis carries a placeholder score of 0.0 that means "never
+    # scored", not "scored zero" — writing "score 0/100" beside the TBD it falls
+    # back to would read as a real assessment (and, later, as a threshold bug).
+    # Say plainly that no score exists instead.
+    score_note = (
+        "not scored — analysis failed" if analysis.analysis_failed
+        else f"score {analysis.score:.0f}/100"
+    )
     entry = (
         f"[{ts}] Bid Qualification: {analysis.bid_qualification} "
-        f"(score {analysis.score:.0f}/100) | {analysis.bid_qualification_reason}"
+        f"({score_note}) | {analysis.bid_qualification_reason}"
     )
 
     # Prepend the newest system reason; keep prior runs' reasons below it.
@@ -99,21 +105,22 @@ def _build_row_update(tender, analysis, run_dt) -> dict:
     }
 
 
-def run(limit: int = None, window_date: str = None) -> dict:
-    """Analyse tenders within a one-day window and write qualifications back.
+def run(limit: int = None) -> dict:
+    """Analyse every eligible tender in the sheet and write qualifications back.
 
-    ``window_date`` is a 'YYYY-MM-DD' string; defaults to today (UK time). Only
-    rows whose WINDOW_DATE_FIELD falls on that date are analysed. Returns a
-    summary dict.
+    Eligibility is the analyzer's single entry point: a row is in scope when its
+    [Bid Qualification] is one of PROCESS_STATUSES (PreQualified / ReCheck) — see
+    should_analyse(). Nothing else is processed, and nothing else is logged per
+    row. There is no date filter: a row stays in scope until it has been given a
+    qualification, so a row missed by a failed or skipped run is simply picked up
+    by the next one. Returns a summary dict.
     """
     run_dt = datetime.now(UK_TIMEZONE)
-    if window_date is None:
-        window_date = run_dt.strftime("%Y-%m-%d")
 
     logger.info("=" * 80)
     logger.info("PS BidAnalyzer — Bid qualification run")
     logger.info(f"Run timestamp: {run_dt.isoformat()}")
-    logger.info(f"One-day window: {WINDOW_DATE_FIELD} == {window_date}")
+    logger.info(f"Scope: rows whose {STATUS_FIELD} is in {sorted(PROCESS_STATUSES)}")
     logger.info("=" * 80)
 
     client = SheetsClient()
@@ -123,8 +130,8 @@ def run(limit: int = None, window_date: str = None) -> dict:
     if limit is not None:
         logger.info(f"--limit applied: analysing at most {limit} qualifying tender(s)")
 
-    summary = {"analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0, "skipped": 0,
-               "out_of_window": 0, "errors": 0}
+    summary = {"eligible": 0, "analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0,
+               "skipped": 0, "errors": 0}
     # Link the alert email straight to the PS Tender Tracker tab (uses the tab's
     # numeric gid so it opens on that tab, not just the spreadsheet default).
     summary["sheet_url"] = (
@@ -142,44 +149,39 @@ def run(limit: int = None, window_date: str = None) -> dict:
     row_color_map = {}   # row number -> background colour for changed rows
     new_status = {}      # row number -> qualification this run assigned
 
-    # Apply the one-day window filter up front so we only process the rows in
-    # scope. The Sheets API can't filter by cell value server-side (the read
-    # always returns the full range), but this keeps the processing loop — and
-    # its logging — focused on the in-window rows instead of every sheet row.
-    in_window = [
+    # Status is the analyzer's entry point, applied once here rather than inside
+    # the loop. The Sheets API can't filter by cell value server-side (the read
+    # always returns the full range), so the selection happens in Python — but
+    # selecting up front means the loop, and every per-row log line it writes,
+    # covers only tenders this run is actually responsible for. Ineligible rows
+    # (manual overrides, and anything already qualified by a previous run) are
+    # dropped here silently and reported as a single count.
+    eligible = [
         tender for tender in tenders
-        if in_day_window(tender.data.get(WINDOW_DATE_FIELD, ""), window_date)
+        if should_analyse(tender.data.get(STATUS_FIELD, ""))
     ]
-    summary["out_of_window"] = len(tenders) - len(in_window)
+    summary["eligible"] = len(eligible)
     logger.info(
-        f"{len(in_window)} of {len(tenders)} row(s) fall within the window "
-        f"({WINDOW_DATE_FIELD} == {window_date}); processing those"
+        f"{len(eligible)} of {len(tenders)} row(s) are {sorted(PROCESS_STATUSES)}; "
+        f"processing those"
     )
 
-    for idx, tender in enumerate(in_window, 1):
+    for idx, tender in enumerate(eligible, 1):
         # Stop once we've analysed the requested number of qualifying tenders.
-        # --limit caps analysed rows (not the raw read) so it composes with --date.
+        # --limit caps analysed rows rather than rows read.
         if limit is not None and summary["analysed"] >= limit:
             break
 
         title = tender.title.strip()
         description = tender.description.strip()
-
         status = tender.data.get(STATUS_FIELD, "").strip()
-        if not should_analyse(status):
-            logger.info(
-                f"[{idx}/{len(in_window)}] Row {tender.row}: status '{status or '(blank)'}' "
-                f"not in {sorted(PROCESS_STATUSES)} — skipping (manual override / already processed)"
-            )
-            summary["skipped"] += 1
-            continue
 
         if not title and not description:
-            logger.info(f"[{idx}/{len(in_window)}] Row {tender.row}: no title/description — skipping")
+            logger.info(f"[{idx}/{len(eligible)}] Row {tender.row}: no title/description — skipping")
             summary["skipped"] += 1
             continue
 
-        logger.info(f"[{idx}/{len(in_window)}] Row {tender.row}: analysing '{title[:70]}' (status: {status})")
+        logger.info(f"[{idx}/{len(eligible)}] Row {tender.row}: analysing '{title[:70]}' (status: {status})")
         try:
             analysis = analyze_tender(title, description, run_date=run_dt,
                                       nobid_patterns=nobid_patterns,
@@ -221,12 +223,12 @@ def run(limit: int = None, window_date: str = None) -> dict:
     logger.info("=" * 80)
     logger.info("BID ANALYSIS COMPLETE — SUMMARY")
     logger.info("=" * 80)
+    logger.info(f"  Eligible : {summary['eligible']} ({'/'.join(sorted(PROCESS_STATUSES))})")
     logger.info(f"  Analysed : {summary['analysed']}")
     logger.info(f"  Bid      : {summary['Bid']}")
     logger.info(f"  TBD      : {summary['TBD']}")
     logger.info(f"  NoBid    : {summary['NoBid']}")
-    logger.info(f"  Skipped  : {summary['skipped']} (in-window, wrong status / no text)")
-    logger.info(f"  Out of window : {summary['out_of_window']}")
+    logger.info(f"  Skipped  : {summary['skipped']} (eligible but no title/description)")
     logger.info(f"  Errors   : {summary['errors']}")
     logger.info("-" * 80)
     logger.info(f"  Sheet-wide Bid : {summary['overall_Bid']}")
@@ -239,14 +241,7 @@ def run(limit: int = None, window_date: str = None) -> dict:
     return summary
 
 
-def _valid_date(value: str) -> str:
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"Invalid date '{value}'. Expected format YYYY-MM-DD.")
-
-
-def _build_report(summary, started_at, finished_at, window_date, environment,
+def _build_report(summary, started_at, finished_at, run_date, environment,
                   error_tb=None):
     """Return (subject, html_body) summarising a completed Bid Analyzer run.
 
@@ -256,28 +251,31 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
     """
     s = summary or {}
     if error_tb:
-        subject = f"❌ PS BidAnalyzer [{environment}] — {window_date} — FAILURE (run aborted)"
+        subject = f"❌ PS BidAnalyzer [{environment}] — {run_date} — FAILURE (run aborted)"
         banner_bg = "#c0392b"
     elif s.get("errors", 0):
         subject = (
-            f"⚠️ PS BidAnalyzer [{environment}] — {window_date} — "
+            f"⚠️ PS BidAnalyzer [{environment}] — {run_date} — "
             f"COMPLETED WITH ERRORS ({s['errors']} row error(s))"
         )
         banner_bg = "#e67e22"
     else:
         subject = (
-            f"✅ PS BidAnalyzer [{environment}] — {window_date} — "
+            f"✅ PS BidAnalyzer [{environment}] — {run_date} — "
             f"SUCCESS ({s.get('analysed', 0)} analysed)"
         )
         banner_bg = "#27ae60"
 
+    # Eligible leads: it is the run's scope (rows in PreQualified / ReCheck), and
+    # Analysed below it shows how much of that scope was actually got through —
+    # the two differ when --limit is set or rows are skipped for missing text.
     metric_rows = [
+        ("Eligible (PreQualified / ReCheck)", s.get("eligible", 0)),
         ("Analysed", s.get("analysed", 0)),
         ("Bid", s.get("Bid", 0)),
         ("TBD", s.get("TBD", 0)),
         ("NoBid", s.get("NoBid", 0)),
-        ("Skipped (wrong status / no text)", s.get("skipped", 0)),
-        ("Out of window", s.get("out_of_window", 0)),
+        ("Skipped (no title / description)", s.get("skipped", 0)),
         ("Errors", s.get("errors", 0)),
     ]
     rows = "".join(
@@ -328,7 +326,7 @@ def _build_report(summary, started_at, finished_at, window_date, environment,
   <p><b>Environment:</b> {environment}<br>
      <b>Started:</b> {started_at}<br>
      <b>Finished:</b> {finished_at}<br>
-     <b>One-day window ({WINDOW_DATE_FIELD}):</b> {window_date}</p>
+     <b>Scope:</b> every row awaiting qualification (PreQualified / ReCheck)</p>
 {qualification_table}
   {sheet_link}
   <h3 style="margin:16px 0 4px;font-size:15px">Bid Analysis - This Run</h3>
@@ -348,30 +346,40 @@ def main():
     _configure_logging()
     parser = argparse.ArgumentParser(description="Run the Onepoint Bid Analyzer over the tender sheet.")
     parser.add_argument("--limit", type=int, default=None, help="Analyse only the first N tenders (for testing).")
+    # --date selected a one-day window that no longer exists: scope is now every
+    # PreQualified/ReCheck row. The flag is still ACCEPTED so an existing
+    # scheduled command keeps starting instead of dying on an unknown argument;
+    # it does nothing but warn. Delete it once the scheduler entry is confirmed
+    # clean.
     parser.add_argument(
         "--date",
-        type=_valid_date,
         default=None,
-        help="One-day window date (YYYY-MM-DD). Defaults to today (UK time).",
+        help=argparse.SUPPRESS,
     )
     args = parser.parse_args()
 
-    # Resolve the window date up front so the alert reports it even if the run
+    if args.date:
+        logger.warning(
+            f"--date {args.date} ignored: the analyzer no longer filters by date and "
+            f"processes every PreQualified/ReCheck row. Remove it from the command."
+        )
+
+    # Stamp the run date for the alert up front so it is reported even if the run
     # aborts before producing a summary.
-    window_date = args.date or datetime.now(UK_TIMEZONE).strftime("%Y-%m-%d")
+    run_date = datetime.now(UK_TIMEZONE).strftime("%Y-%m-%d")
     started_at = datetime.now(UK_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
     summary = None
     error_tb = None
     try:
-        summary = run(limit=args.limit, window_date=window_date)
+        summary = run(limit=args.limit)
     except Exception as e:
         error_tb = traceback.format_exc()
         logger.error(f"Fatal error: {e}", exc_info=True)
 
     finished_at = datetime.now(UK_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     subject, html = _build_report(
-        summary, started_at, finished_at, window_date, ENVIRONMENT, error_tb
+        summary, started_at, finished_at, run_date, ENVIRONMENT, error_tb
     )
     send_alert(subject, html, NOTIFICATIONS)
 

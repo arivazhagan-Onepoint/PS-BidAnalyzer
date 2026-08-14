@@ -51,20 +51,21 @@ project_config.json ──▶ SheetsClient.read_tenders()
 
 ```bash
 # From the project root
-python -m analyzer.main                    # analyse today's window
-python -m analyzer.main --date 2026-07-03  # analyse a specific day (backfill/rerun)
+python -m analyzer.main                    # analyse every PreQualified/ReCheck row
 python -m analyzer.main --limit 5          # cap to first 5 rows (quick test)
 ```
 
-## One-day window
+## No date filter
 
-The analyzer only processes rows dated within a **single day**, anchored on the
-`Last Modified Date` column (`WINDOW_DATE_FIELD` in `config.py`). The upstream
-process stamps this field to the run time for both newly-created `PreQualified`
-rows and `ReCheck` rows it re-flags, so the window captures every row worth
-analysing that day. The window defaults to **today** (UK time); pass `--date YYYY-MM-DD` to
-target another day. Rows outside the window are counted as `Out of window` and
-never sent to the model.
+The analyzer processes **every** eligible row in the tracker, however old. Scope
+is `PROCESS_STATUSES` alone: a row stays in scope until it has been given a
+qualification, so one missed by a failed or skipped run is picked up by the next
+rather than stranded.
+
+An earlier version filtered to a one-day window anchored on `Last Modified Date`.
+It was removed because any row the window excluded was excluded from every future
+run too. The trade-off: nothing now bounds how many rows a single run processes —
+`--limit` is the only brake, and it is manual.
 
 ## Which rows get analysed
 
