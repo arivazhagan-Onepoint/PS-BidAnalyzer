@@ -214,6 +214,26 @@ STATUS_FIELD = "Bid Qualification"
 COMPLETED_STATUS = "Done"
 MARK_COMPLETE = True
 
+# --- Where the report link is recorded --------------------------------------
+# The dated entry (carrying the report URL) is prepended to the system reason
+# column, newest first, exactly as analyzer/main.py does — so one column reads as
+# the full history of every automated judgement on the row, both stages included.
+# The same entry is appended to Comments, which stays oldest-first.
+#
+# Note this means the stage now writes the system reason column, which its earlier
+# design avoided. That is safe precisely because the convention is prepend: both
+# stages add to the top of a shared log rather than overwriting each other, and
+# Bid Qualification Reason(Human) is still never touched.
+SYSTEM_REASON_FIELD = "Bid Qualification Reason(System)"
+
+# Fields whose text gets URLs turned into real hyperlinks. Measured 2026-08-22:
+# Sheets does NOT auto-link a URL embedded in a longer text block under either
+# RAW or USER_ENTERED — only a cell that is nothing but the URL becomes clickable.
+# Since both these columns are append-only logs, the link has to be applied as
+# explicit rich-text runs (see sheets_client.write_updates), which is also why
+# this needs no valueInputOption special-casing.
+LINK_FIELDS = (SYSTEM_REASON_FIELD, "Comments")
+
 # Only ever marked after a report exists. A row marked Done whose report failed
 # to write would be silently stranded — out of scope, with nothing to show for
 # it — so a report failure deliberately leaves the row in 'Docs(Ready)' for the

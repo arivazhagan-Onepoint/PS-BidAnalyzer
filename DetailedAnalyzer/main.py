@@ -34,6 +34,8 @@ from .config import (
     COMPLETED_STATUS,
     MARK_COMPLETE,
     MARK_COMPLETE_REQUIRES_REPORT,
+    SYSTEM_REASON_FIELD,
+    LINK_FIELDS,
     REPORTS_ENABLED,
     REPORTS_FOLDER_ID,
     EMAIL_LINK_REPORTS,
@@ -93,14 +95,21 @@ def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> 
     if mark_done:
         update[STATUS_FIELD] = COMPLETED_STATUS
 
-    # Comments stays an append-only log (oldest first), same convention as the
-    # analyzer so one column reads as a single history of everything that has
-    # happened to the row.
     entry = (
         f"[{ts}] Detailed analysis: {brief.likelihood_summary}"
-        f"{' — ' + report_url if report_url else ''}"
+        f"{' | Report: ' + report_url if report_url else ''}"
         f"{f' | {STATUS_FIELD} set to {COMPLETED_STATUS}' if mark_done else ''}"
     )
+
+    # The system reason column is prepended to, newest first — the analyzer's
+    # convention, so the two stages' entries interleave into one readable history
+    # of every automated judgement on this row rather than two rival logs.
+    prior_reason = tender.data.get(SYSTEM_REASON_FIELD, "")
+    update[SYSTEM_REASON_FIELD] = f"{entry}\n{prior_reason}" if prior_reason else entry
+
+    # Comments stays append-only (oldest first), also matching the analyzer, so
+    # one column reads as the chronological history of everything that has
+    # happened to the row.
     prior_comments = tender.data.get("Comments", "")
     update["Comments"] = f"{prior_comments}\n{entry}" if prior_comments else entry
 
@@ -250,7 +259,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         ))
 
     if updates and WRITE_BACK_ENABLED and not dry_run:
-        summary["written"] = client.write_updates(updates)
+        summary["written"] = client.write_updates(updates, link_fields=LINK_FIELDS)
     elif updates:
         logger.info(
             f"Write-back disabled: {len(updates)} row(s) would have been updated "

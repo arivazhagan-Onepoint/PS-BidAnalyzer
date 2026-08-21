@@ -18,6 +18,7 @@ never creates a tab or a column.
 """
 import logging
 import random
+import re
 import time
 
 from google.oauth2.service_account import Credentials
@@ -44,6 +45,39 @@ FIRST_DATA_ROW = 3
 # carried along in Tender.data for the prompt to draw on.
 TITLE_FIELD       = "Name"
 DESCRIPTION_FIELD = "Tender Description"
+
+
+# URLs inside a log entry. Trailing punctuation is excluded from the match so a
+# link at the end of a sentence does not swallow the full stop.
+_URL_RE = re.compile(r"https?://[^\s<>\"]+[^\s<>\".,;:)\]]")
+
+
+def _link_runs(text: str) -> list:
+    """textFormatRuns turning every URL in ``text`` into a hyperlink.
+
+    A run at index 0 with empty formatting is always emitted first: the API takes
+    runs as "formatting from here on", so without it the first URL's link styling
+    would bleed backwards over the text preceding it. Each link run is likewise
+    closed by a plain run at the URL's end.
+    """
+    runs, cursor = [], 0
+    for match in _URL_RE.finditer(text):
+        start, end = match.span()
+        if start > cursor or not runs:
+            runs.append({"startIndex": cursor, "format": {}})
+        runs.append({"startIndex": start, "format": {"link": {"uri": match.group(0)}}})
+        cursor = end
+    if runs and cursor < len(text):
+        runs.append({"startIndex": cursor, "format": {}})
+    # Runs must be strictly increasing; a URL at index 0 makes the opening plain
+    # run and the link run collide, so drop the redundant one.
+    deduped = []
+    for run in runs:
+        if deduped and deduped[-1]["startIndex"] == run["startIndex"]:
+            deduped[-1] = run
+        else:
+            deduped.append(run)
+    return deduped
 
 
 def _col_letter(n: int) -> str:
@@ -188,15 +222,24 @@ class SheetsClient:
         col = _col_letter(self._field_idx[field] + 1)
         return f"'{SHEET_NAME}'!{col}{row}"
 
-    def write_updates(self, updates: list) -> int:
-        """Write this stage's output back to the sheet in one batch.
+    def write_updates(self, updates: list, link_fields=()) -> int:
+        """Write this stage's output back to the sheet. Returns rows updated.
 
         ``updates`` is a list of (row_number, {field: value}) tuples. A field the
         sheet's header row does not contain is skipped with a warning rather than
-        created — the sheet's structure is maintained by hand. Returns the number
-        of rows updated.
+        created — the sheet's structure is maintained by hand.
+
+        ``link_fields`` names the fields whose text should have any URLs in it
+        turned into working hyperlinks. Those cells go through updateCells with
+        explicit rich-text runs rather than a plain value write, because Sheets
+        does not auto-link a URL embedded in a longer block of text (measured, not
+        assumed — under RAW and USER_ENTERED alike). Everything else is written as
+        RAW, which is the safe mode for cells holding model-written prose: under
+        USER_ENTERED a sentence opening with "=" would be parsed as a formula.
         """
-        data = []
+        link_fields = set(link_fields)
+        data, rich_requests = [], []
+
         for row, field_values in updates:
             for field, value in field_values.items():
                 if field not in self._field_idx:
@@ -206,18 +249,63 @@ class SheetsClient:
                         f"config.OUTPUT_FIELD_MAP."
                     )
                     continue
-                data.append({"range": self._cell_range(field, row), "values": [[value]]})
+                if field in link_fields and _URL_RE.search(str(value)):
+                    rich_requests.append(
+                        self._rich_text_request(field, row, str(value))
+                    )
+                else:
+                    data.append(
+                        {"range": self._cell_range(field, row), "values": [[value]]}
+                    )
 
-        if not data:
+        if not (data or rich_requests):
             return 0
 
-        self._execute_with_retry(
-            lambda: self.sheets_service.spreadsheets().values().batchUpdate(
-                spreadsheetId=self.sheet_id,
-                body={"valueInputOption": "RAW", "data": data},
-            ).execute()
-        )
+        if data:
+            self._execute_with_retry(
+                lambda: self.sheets_service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=self.sheet_id,
+                    body={"valueInputOption": "RAW", "data": data},
+                ).execute()
+            )
+        if rich_requests:
+            self._execute_with_retry(
+                lambda: self.sheets_service.spreadsheets().batchUpdate(
+                    spreadsheetId=self.sheet_id,
+                    body={"requests": rich_requests},
+                ).execute()
+            )
+
         logger.info(
-            f"Wrote detailed analysis to {len(updates)} row(s) ({len(data)} cells)"
+            f"Wrote detailed analysis to {len(updates)} row(s) "
+            f"({len(data)} value cell(s), {len(rich_requests)} linked cell(s))"
         )
         return len(updates)
+
+    def _rich_text_request(self, field: str, row: int, text: str) -> dict:
+        """An updateCells request writing ``text`` with every URL hyperlinked.
+
+        EVERY URL in the cell is linked, not just this run's. These columns are
+        append-only logs, and updateCells replaces the cell's formatting wholesale
+        — so linking only the newest entry would strip the links off every report
+        recorded by a previous run.
+        """
+        col = self._field_idx[field]
+        return {
+            "updateCells": {
+                "range": {
+                    "sheetId": self.sheet_tab_id,
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": col,
+                    "endColumnIndex": col + 1,
+                },
+                "rows": [{
+                    "values": [{
+                        "userEnteredValue": {"stringValue": text},
+                        "textFormatRuns": _link_runs(text),
+                    }]
+                }],
+                "fields": "userEnteredValue,textFormatRuns",
+            }
+        }
