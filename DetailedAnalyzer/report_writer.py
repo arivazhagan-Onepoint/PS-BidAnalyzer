@@ -57,6 +57,25 @@ def _normalise(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (label or "").lower()).strip()
 
 
+# A label must be at least this long before a prefix match is trusted. Short keys
+# like "location" would prefix-match half a dozen unrelated rows; a long one that
+# matches from the first character is the field, followed by its guidance text.
+_PREFIX_MATCH_MIN_LEN = 12
+
+
+def _prefix_match(key: str, by_label: dict):
+    """Row whose label starts with ``key``, when there is exactly one.
+
+    Ambiguity is refused rather than guessed: writing a value to the wrong row
+    produces a brief that looks complete and states something false, which is
+    worse than the gap plus the warning the caller logs.
+    """
+    if len(key) < _PREFIX_MATCH_MIN_LEN:
+        return None
+    hits = [row for label, row in by_label.items() if label.startswith(key)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _sanitise(value: str) -> str:
     """Make one name segment safe for a file name, on any OS."""
     text = " ".join((value or "").split())
@@ -174,7 +193,15 @@ class ReportWriter:
 
         data, written, unmatched = [], 0, []
         for label, value in brief.fields.items():
-            row = by_label.get(_normalise(label))
+            key = _normalise(label)
+            row = by_label.get(key)
+            if not row:
+                # Fall back to a prefix match. Some template rows carry guidance
+                # after the field name — "Likelihood of Winning" is followed by all
+                # four band definitions on continuation lines — so an exact match
+                # misses them. Without this the most important row in the brief
+                # (the likelihood itself) silently stayed empty.
+                row = _prefix_match(key, by_label)
             if not row:
                 unmatched.append(label)
                 continue
@@ -196,7 +223,7 @@ class ReportWriter:
         if data:
             self.sheets.spreadsheets().values().batchUpdate(
                 spreadsheetId=file_id,
-                body={"valueInputOption": "USER_ENTERED", "data": data},
+                body={"valueInputOption": "RAW", "data": data},
             ).execute()
 
         dims_written = self._write_fit_dimensions(
@@ -281,7 +308,7 @@ class ReportWriter:
         self.sheets.spreadsheets().values().update(
             spreadsheetId=file_id,
             range=f"'{tab_name}'!A{start}",
-            valueInputOption="USER_ENTERED",
+            valueInputOption="RAW",
             body={"values": rows},
         ).execute()
         return len(rows)

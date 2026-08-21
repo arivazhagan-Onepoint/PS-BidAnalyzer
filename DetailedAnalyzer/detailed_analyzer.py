@@ -127,8 +127,35 @@ def _format_tender_facts(tender_data: dict) -> str:
     return "\n".join(lines) if lines else "(No further structured fields on this row.)"
 
 
+def _timeline_block(deterministic: dict) -> str:
+    """The computed timeline, stated to the model in words it cannot misread.
+
+    Without this the model sees a due date and no notion of today, so it cannot
+    tell a live tender from a closed one — the first run produced a brief reading
+    "Deadline passed 22 days ago" beside "Proceed with bid", because the countdown
+    is computed after the call and was never shown to it. The template calls
+    Section 1 a critical gate; this is what makes it one.
+    """
+    lines = [
+        f"Today's date: {deterministic.get('Current Date', 'unknown')}",
+        f"Time remaining: {deterministic.get('Time Remaining', 'unknown')}",
+        f"Urgency: {deterministic.get('Urgency Status', 'unknown')}",
+    ]
+    expired = "deadline has passed" in deterministic.get("Urgency Status", "").lower()
+    if expired:
+        lines.append(
+            "THIS TENDER'S SUBMISSION DEADLINE HAS ALREADY PASSED. It cannot be "
+            "bid. Say so plainly in the recommendation, and set the likelihood of "
+            "winning to 0 — a closed tender cannot be won, however good the fit "
+            "would have been. Still complete the rest of the brief: it is useful "
+            "as a record of what was missed and of Onepoint's fit for work of "
+            "this kind."
+        )
+    return "\n".join(lines)
+
+
 def _build_prompt(title: str, description: str, facts: str, context: str,
-                  corpus: str = "") -> str:
+                  corpus: str = "", timeline: str = "") -> str:
     """Assemble the prompt asking for every derived field in the template."""
     context_block = context if context else "(No Onepoint capability context provided.)"
 
@@ -165,6 +192,9 @@ Description: {description}
 
 Tender facts:
 {facts}
+
+Timeline (computed — authoritative, use this rather than inferring dates):
+{timeline}
 
 Complete Onepoint's bid qualification brief for this tender.
 
@@ -326,7 +356,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
     context = load_onepoint_context()
     corpus = load_corpus()
     prompt = _build_prompt(title, description, _format_tender_facts(tender_data),
-                           context, corpus)
+                           context, corpus, _timeline_block(deterministic))
 
     last_error = None
     for attempt in range(1, DETAIL_MAX_RETRIES + 1):
