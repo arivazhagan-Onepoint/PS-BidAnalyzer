@@ -28,7 +28,11 @@ from .config import (
     TEMPLATE_SPREADSHEET_ID,
     REPORTS_FOLDER_ID,
     REPORT_NAME_PATTERN,
+    REPORT_RUNTIME_FORMAT,
     REPORT_NAME_MAX_TITLE,
+    REPORT_NAME_NO_PORTAL,
+    REPORT_NAME_NO_ID,
+    REPORT_NAME_UNSAFE_CHARS,
     RENAME_REPORT_TAB,
     TEMPLATE_LABEL_COL,
     TEMPLATE_DETAIL_COL,
@@ -53,6 +57,44 @@ def _normalise(label: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (label or "").lower()).strip()
 
 
+def _sanitise(value: str) -> str:
+    """Make one name segment safe for a file name, on any OS."""
+    text = " ".join((value or "").split())
+    for ch in REPORT_NAME_UNSAFE_CHARS:
+        text = text.replace(ch, " ")
+    # Collapse whatever the replacements left behind.
+    return " ".join(text.split()).strip(" .-")
+
+
+def report_name(tender_data: dict, run_dt) -> str:
+    """PortalName-TenderID-TenderTitle-Report-RunTime for one tender row.
+
+    Module level, and needing no credentials, so a dry run can report the exact
+    name a real run would create without authenticating anything.
+    """
+    portal = _sanitise(tender_data.get("Portal Name", "")) or REPORT_NAME_NO_PORTAL
+    # OCID first: it is the OCDS global identifier (ocds-h6vhtk-…), traceable back
+    # to the source record and unique across portals, whereas ID is a portal-local
+    # notice number that two portals could in principle both issue. Both were 100%
+    # populated and fully distinct across all 529 tracker rows when checked
+    # (2026-08-21), so the ID fallback is belt-and-braces rather than expected.
+    tender_id = (_sanitise(tender_data.get("OCID", ""))
+                 or _sanitise(tender_data.get("ID", ""))
+                 or REPORT_NAME_NO_ID)
+    title = _sanitise(tender_data.get("Name", "")) or "Untitled tender"
+    if len(title) > REPORT_NAME_MAX_TITLE:
+        # Trim on a word boundary where there is one — a name cut mid-word reads
+        # as corrupted rather than shortened.
+        trimmed = title[:REPORT_NAME_MAX_TITLE]
+        title = (trimmed.rsplit(" ", 1)[0] if " " in trimmed else trimmed).rstrip(" .-")
+    return REPORT_NAME_PATTERN.format(
+        portal=portal,
+        tender_id=tender_id,
+        title=title,
+        runtime=run_dt.strftime(REPORT_RUNTIME_FORMAT),
+    )
+
+
 class ReportWriter:
     def __init__(self):
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
@@ -60,15 +102,9 @@ class ReportWriter:
         self.drive = build("drive", "v3", credentials=creds)
 
     # --- copy -----------------------------------------------------------------
-    def _report_name(self, title: str) -> str:
-        clean = " ".join((title or "Untitled tender").split())
-        if len(clean) > REPORT_NAME_MAX_TITLE:
-            clean = clean[:REPORT_NAME_MAX_TITLE].rstrip() + "…"
-        return REPORT_NAME_PATTERN.format(title=clean)
-
-    def create_report(self, title: str) -> tuple:
+    def create_report(self, tender_data: dict, run_dt) -> tuple:
         """Copy the template into the reports folder. Returns (file_id, url)."""
-        name = self._report_name(title)
+        name = report_name(tender_data, run_dt)
         try:
             copied = self.drive.files().copy(
                 fileId=TEMPLATE_SPREADSHEET_ID,
@@ -96,9 +132,9 @@ class ReportWriter:
         ).execute()
         return meta["sheets"][0]["properties"]
 
-    def _rename_tab(self, file_id: str, tab_id: int, title: str):
-        """Rename the copied tab so it doesn't still name the template's tender."""
-        new_title = self._report_name(title)[:100]
+    def _rename_tab(self, file_id: str, tab_id: int, new_title: str):
+        """Rename the copied tab (off by default — see RENAME_REPORT_TAB)."""
+        new_title = new_title[:100]
         self.sheets.spreadsheets().batchUpdate(
             spreadsheetId=file_id,
             body={"requests": [{
@@ -110,13 +146,17 @@ class ReportWriter:
         ).execute()
         return new_title
 
-    def fill_report(self, file_id: str, brief, title: str = "") -> dict:
-        """Write the brief into the copied report. Returns a small stats dict."""
+    def fill_report(self, file_id: str, brief, report_title: str = "") -> dict:
+        """Write the brief into the copied report. Returns a small stats dict.
+
+        ``report_title`` is only used when RENAME_REPORT_TAB is on. Named to avoid
+        shadowing the module-level report_name() in this scope.
+        """
         props = self._first_tab(file_id)
         tab_id, tab_name = props["sheetId"], props["title"]
 
-        if RENAME_REPORT_TAB and title:
-            tab_name = self._rename_tab(file_id, tab_id, title)
+        if RENAME_REPORT_TAB and report_title:
+            tab_name = self._rename_tab(file_id, tab_id, report_title)
 
         # Read column A of the copy — the labels as they actually are, not as
         # template.py remembers them.
@@ -247,19 +287,20 @@ class ReportWriter:
         return len(rows)
 
     # --- one call -------------------------------------------------------------
-    def write(self, brief, title: str) -> str:
-        """Create and fill a report for one tender. Returns its URL."""
-        file_id, url = self.create_report(title)
-        self.fill_report(file_id, brief, title)
-        return url
+    def write(self, brief, tender_data: dict, run_dt) -> tuple:
+        """Create and fill a report for one tender. Returns (name, file_id, url)."""
+        name = report_name(tender_data, run_dt)
+        file_id, url = self.create_report(tender_data, run_dt)
+        self.fill_report(file_id, brief, name)
+        return name, file_id, url
 
 
-def render_markdown(brief, title: str = "") -> str:
+def render_markdown(brief, heading: str = "") -> str:
     """Render a brief as markdown — for --dry-run and for the run log.
 
     Walks the template in its own order so the text and the spreadsheet agree.
     """
-    lines = [f"# {REPORT_NAME_PATTERN.format(title=title or 'Untitled tender')}", ""]
+    lines = [f"# {heading or 'Detailed analysis'}", ""]
     for section, label, kind, _src in tpl.section_rows():
         if section:
             lines += ["", f"## {section}", ""]

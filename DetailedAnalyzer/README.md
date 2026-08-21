@@ -110,8 +110,10 @@ by the root `.gitignore`'s `*.log`.
 
 ## Before this can run for real
 
-1. **Confirm the scope** — `PROCESS_STATUSES` currently assumes
-   `{Bid(AI), Bid(Human), Bid}`.
+1. ~~Confirm the scope~~ — settled: `PROCESS_STATUSES` is `{Bid(AI),
+   Bid(Human)}`. The bare `Bid` is excluded because it carries no attribution as
+   to who decided it; requiring the suffix means a row only reaches this stage
+   once a machine or a person has owned that call.
 2. **Decide the exit condition** — set `ALREADY_DETAILED_FIELD` to the column
    that marks a row as done. Without it, every run re-analyses every Bid row,
    because this stage does not change the status the way the analyzer does.

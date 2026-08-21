@@ -183,16 +183,21 @@ DEDUPE_IDENTICAL_TABS = True
 SKIP_TABS = ("read me", "declaration")
 
 # --- Which rows get a detailed analysis -------------------------------------
-# TODO confirm. The working assumption is that detailed analysis is the stage
-# AFTER qualification: a row is in scope once it has been qualified as a Bid,
-# whether by the analyzer or by a human. Both spellings are listed plus the bare
-# value, matching how the tracker's statuses are actually written.
+# Confirmed 2026-08-21: scope is the single status 'Docs(Ready)'. Compared
+# case-insensitively after trimming.
+#
+# This is a better gate than the Bid statuses it replaced, and for a specific
+# reason: a detailed brief is only worth producing once the tender's documents
+# are actually available to read. 'Bid(AI)' says someone thinks the opportunity is
+# worth pursuing, which is not the same thing — briefing a tender whose pack has
+# not landed yet produces an assessment built on the notice summary alone.
+# 'Docs(Ready)' asserts the input this stage needs.
 #
 # Note this set has no natural exit condition the way the analyzer's does — a
-# 'Bid(AI)' row stays 'Bid(AI)' after this module runs, so it would be picked up
-# again on every subsequent run. Whatever marks a row as already-detailed is the
-# other half of this decision; see ALREADY_DETAILED_FIELD below.
-PROCESS_STATUSES = {"Bid(AI)", "Bid(Human)", "Bid"}
+# 'Docs(Ready)' row stays 'Docs(Ready)' after this module runs, so it would be
+# picked up again on every subsequent run. Whatever marks a row as already-detailed
+# is the other half of this decision; see ALREADY_DETAILED_FIELD below.
+PROCESS_STATUSES = {"Docs(Ready)"}
 
 # Column holding the qualification status used for the filter above.
 STATUS_FIELD = "Bid Qualification"
@@ -210,17 +215,39 @@ ALREADY_DETAILED_FIELD = None
 # with whoever owns that bid, and nothing in this code has to invent tabs inside
 # a sheet whose structure is maintained by hand.
 TEMPLATE_SPREADSHEET_ID = "1ImvX_fN7UHfgLFXV1to5V2pTZrGSJStPw3rHnBn6FLA"
-TEMPLATE_TAB_NAME = "AI Bid Analyser - Met Office EUMETNET Data Hubs Summary"
+TEMPLATE_TAB_NAME = "Detailed Analysis Template"
 REPORTS_FOLDER_ID = "1yJ6tTlVB_R696RgwuipL2RTmdnnvxq10"
 
-# Report file name. Follows the template tab's own convention. Truncated because
-# Drive names are limited and a tender title can run to hundreds of characters.
-REPORT_NAME_PATTERN = "AI Bid Analyser - {title} Summary"
-REPORT_NAME_MAX_TITLE = 90
+# Report file name: PortalName-TenderID-TenderTitle-Report-RunTime.
+# The run time is part of the name on purpose — it makes every run's output
+# distinct, so re-analysing a tender leaves the previous brief intact beside the
+# new one rather than silently replacing an assessment someone may already have
+# read and acted on.
+REPORT_NAME_PATTERN = "{portal}-{tender_id}-{title}-Report-{runtime}"
+REPORT_RUNTIME_FORMAT = "%Y%m%d-%H%M%S"
 
-# The copied report's tab is renamed to match the file, so an opened report does
-# not claim to be about the Met Office tender the template was built from.
-RENAME_REPORT_TAB = True
+# Only the title is truncated — the portal, ID and timestamp are what make the
+# name identifiable, so they are never cut.
+REPORT_NAME_MAX_TITLE = 80
+
+# Placeholders when the tracker row has no portal or ID. Kept explicit rather than
+# collapsing the segment, so the name keeps its five-part shape and stays
+# parseable even for an incomplete row.
+REPORT_NAME_NO_PORTAL = "UnknownPortal"
+REPORT_NAME_NO_ID = "NoID"
+
+# Characters replaced in the name. '/' and '\' would read as path separators once
+# a report is downloaded, and the rest are rejected or mangled by one OS or
+# another. Hyphen is the field separator, so a title containing hyphens makes the
+# name slightly ambiguous to split — accepted, since these names are read by
+# people rather than parsed.
+REPORT_NAME_UNSAFE_CHARS = r'/\:*?"<>|'
+
+# The copied report's tab is left as the template named it ("Detailed Analysis
+# Template"). The file name now carries the tender's identity, so renaming the tab
+# adds nothing — and the full report name would exceed the 100-character tab
+# limit anyway. Set True to have the tab renamed after the report instead.
+RENAME_REPORT_TAB = False
 
 # Column A / B of the template — the label column and the column filled in.
 TEMPLATE_LABEL_COL = "A"
@@ -231,6 +258,13 @@ TEMPLATE_DETAIL_COL = "B"
 # aside for exactly this, and a wrong one can simply be trashed. Set False to
 # analyse and log without touching Drive.
 REPORTS_ENABLED = True
+
+# --- Output: reports referenced from the summary email ----------------------
+# The email links each report rather than attaching it. The Drive copy stays the
+# single record — an attachment forks it the moment someone edits their copy —
+# and a link costs nothing against the relay's message size limit, which matters
+# when a run's scope is every eligible row.
+EMAIL_LINK_REPORTS = True
 
 # --- Output: write-back to the tracker --------------------------------------
 # TODO. The tracker's DATASET_FIELDS has no column for the likelihood score or

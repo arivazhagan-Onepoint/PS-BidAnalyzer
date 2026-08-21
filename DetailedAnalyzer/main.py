@@ -19,6 +19,7 @@ import logging
 import sys
 import traceback
 from datetime import datetime
+from html import escape as html_escape
 
 from .config import (
     LOG_FILE,
@@ -32,11 +33,12 @@ from .config import (
     WRITE_BACK_ENABLED,
     REPORTS_ENABLED,
     REPORTS_FOLDER_ID,
+    EMAIL_LINK_REPORTS,
     should_analyse,
     already_detailed,
 )
 from .detailed_analyzer import analyse_tender_detail
-from .report_writer import ReportWriter, render_markdown
+from .report_writer import ReportWriter, render_markdown, report_name
 from .sheets_client import SheetsClient
 
 # notifier.py lives at the project root (stdlib-only email transport), importable
@@ -125,7 +127,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
 
     summary = {"eligible": 0, "analysed": 0, "skipped": 0, "errors": 0,
                "written": 0, "reports": 0, "report_errors": 0,
-               "Bid": 0, "TBD": 0, "NoBid": 0,
+               "Bid": 0, "TBD": 0, "NoBid": 0, "report_refs": [],
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -199,11 +201,16 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
 
         report_url = ""
         if dry_run:
-            logger.info("\n" + render_markdown(brief, title))
+            logger.info("\n" + render_markdown(brief, report_name(tender.data, run_dt)))
         elif REPORTS_ENABLED:
             try:
-                report_url = writer.write(brief, title)
+                name, file_id, report_url = writer.write(brief, tender.data, run_dt)
                 summary["reports"] += 1
+                # Kept for the email — its attachments and its list of links.
+                summary["report_refs"].append({
+                    "name": name, "file_id": file_id, "url": report_url,
+                    "title": title, "likelihood": brief.likelihood_summary,
+                })
             except Exception as e:
                 # The analysis succeeded; only the report failed. Count it
                 # separately so a Drive permission problem is not mistaken for a
@@ -243,6 +250,38 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                 f"{'' if summary['write_back_enabled'] else ' (write-back disabled)'}")
     logger.info("=" * 80)
     return summary
+
+
+def _reports_table(summary) -> str:
+    """HTML table of this run's reports — tender, likelihood, and a direct link.
+
+    This is how a report is reached: one click from the mailbox to the exact brief
+    for that tender. Without it a report is only findable by browsing the Drive
+    folder, which is the difference between a deliverable and a file that exists.
+
+    The likelihood sits beside each link so the table is scannable on its own —
+    the reader can see which briefs are worth opening before opening any.
+    """
+    refs = summary.get("report_refs") or []
+    if not (EMAIL_LINK_REPORTS and refs):
+        return ""
+    rows = "".join(
+        f"<tr><td><a href=\"{r['url']}\">{html_escape(r['title'][:90]) or r['name']}</a>"
+        f"<br><span style='color:#999;font-size:11px'>{html_escape(r['name'])}</span></td>"
+        f"<td style='text-align:right;white-space:nowrap'><b>{r['likelihood']}</b></td></tr>"
+        for r in refs
+    )
+    return f"""\
+  <h3 style="margin:16px 0 4px;font-size:15px">Reports produced ({len(refs)})</h3>
+  <table cellpadding="8" cellspacing="0" border="1"
+         style="border-collapse:collapse;border-color:#ddd;font-size:14px">
+    <tr style="background:#f0f0f0"><th align="left">Tender — click to open its report</th>
+        <th>Likelihood of Winning</th></tr>
+    {rows}
+  </table>
+  <p style="color:#888;font-size:12px;margin:4px 0 0">
+     Each link opens that tender's brief in Drive. The Drive copy is the record —
+     it is not attached, so there is only ever one version of an assessment.</p>"""
 
 
 def _build_report(summary, started_at, finished_at, run_date, environment,
@@ -340,6 +379,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
      <b>Scope:</b> tenders qualified as Bid and not yet analysed in detail</p>
   {dry_run_note}
   {sheet_link}
+{_reports_table(s)}
   <h3 style="margin:16px 0 4px;font-size:15px">Detailed Analysis - This Run</h3>
   <table cellpadding="8" cellspacing="0" border="1"
          style="border-collapse:collapse;border-color:#ddd;font-size:14px">
