@@ -202,10 +202,28 @@ PROCESS_STATUSES = {"Docs(Ready)"}
 # Column holding the qualification status used for the filter above.
 STATUS_FIELD = "Bid Qualification"
 
-# TODO. Set this to the column that records a completed detailed analysis; rows
-# where it is non-empty are skipped, which is what stops every run re-analysing
-# the same tenders. Leave as None to disable the check (every in-scope row is
-# analysed every run — fine for testing, expensive in production).
+# --- Marking a row complete -------------------------------------------------
+# What stops a row being analysed again. On success the row's STATUS_FIELD is
+# moved from 'Docs(Ready)' to 'Done', which takes it out of PROCESS_STATUSES and
+# therefore out of scope — the exit condition this stage previously lacked, and
+# the reason the first two runs produced two reports for the same tender.
+#
+# Note this means the stage DOES write STATUS_FIELD, unlike its earlier design.
+# That follows from 'Docs(Ready)' being the gate: whatever consumes a workflow
+# status has to be what advances it, or the workflow cannot move.
+COMPLETED_STATUS = "Done"
+MARK_COMPLETE = True
+
+# Only ever marked after a report exists. A row marked Done whose report failed
+# to write would be silently stranded — out of scope, with nothing to show for
+# it — so a report failure deliberately leaves the row in 'Docs(Ready)' for the
+# next run to retry.
+MARK_COMPLETE_REQUIRES_REPORT = True
+
+# Optional belt-and-braces: a column that, when non-empty, takes a row out of
+# scope regardless of status. Not needed now that COMPLETED_STATUS moves the row
+# out on its own; set it if you later want the status and the completion mark to
+# be independent.
 ALREADY_DETAILED_FIELD = None
 
 # --- Output: one report per tender ------------------------------------------
@@ -267,19 +285,22 @@ REPORTS_ENABLED = True
 EMAIL_LINK_REPORTS = True
 
 # --- Output: write-back to the tracker --------------------------------------
-# TODO. The tracker's DATASET_FIELDS has no column for the likelihood score or
-# the report link. Add the column(s) to the sheet by hand first (the sheet's
-# structure is maintained manually, not by this code), then map them here.
+# Optional extra columns. The tracker has no column for the likelihood score or
+# the report link yet; add them to the sheet by hand (its structure is maintained
+# manually, not by this code) and map them here to have them written.
 #
 # Keys are TenderBrief attributes, values are sheet column names, e.g.
 #   {"likelihood_summary": "Likelihood of Winning", "report_url": "Detailed Analysis"}
+# An empty map is fine — it only means those two values live in the report and the
+# email rather than in a tracker column.
 OUTPUT_FIELD_MAP = {}
 
-# Master switch for the write-back step. Ships FALSE: until OUTPUT_FIELD_MAP is
-# filled in and the columns exist, a run reads the sheet, analyses, logs what it
-# would have written, and touches nothing. Flip to True once the mapping is real
-# — the live PS Tender Tracker is not the place to discover a half-built writer.
-WRITE_BACK_ENABLED = False
+# Master switch for the write-back step. Now TRUE: it was False while the writer
+# was unproven, but marking a row 'Done' IS a write, so leaving this off would
+# make MARK_COMPLETE silently do nothing and every run would keep re-analysing the
+# same rows. The columns written are all ones that already exist — STATUS_FIELD,
+# Comments, Processed Date, Last Modified Date — plus anything mapped above.
+WRITE_BACK_ENABLED = True
 
 
 def should_analyse(status: str) -> bool:

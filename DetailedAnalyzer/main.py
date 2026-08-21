@@ -31,6 +31,9 @@ from .config import (
     PROCESS_STATUSES,
     OUTPUT_FIELD_MAP,
     WRITE_BACK_ENABLED,
+    COMPLETED_STATUS,
+    MARK_COMPLETE,
+    MARK_COMPLETE_REQUIRES_REPORT,
     REPORTS_ENABLED,
     REPORTS_FOLDER_ID,
     EMAIL_LINK_REPORTS,
@@ -63,16 +66,21 @@ def _configure_logging():
     )
 
 
-def _build_row_update(tender, brief, run_dt, report_url="") -> dict:
+def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> dict:
     """Assemble the field->value map to write back for one analysed tender.
 
     Output goes to whatever columns OUTPUT_FIELD_MAP names (keys are TenderBrief
-    attributes, values are sheet columns); an empty map means only the audit trail
-    below is written. This stage never touches [Bid Qualification] or either Bid
-    Qualification Reason column — the qualification is the analyzer's to set and
-    the human reason is the team's. Note the brief's likelihood band implies a
-    qualification (brief.qualification_family) but deliberately does not write it:
-    two stages writing the same column would fight over it.
+    attributes, values are sheet columns); an empty map means only the status and
+    the audit trail below are written.
+
+    When ``mark_done`` the row's status moves to COMPLETED_STATUS, taking it out
+    of scope for future runs. The brief's likelihood band implies a qualification
+    (brief.qualification_family) but is deliberately NOT written as the status:
+    the likelihood is an assessment of this tender, recorded in the report, while
+    the status column tracks where the row is in the workflow. Overwriting a
+    workflow state with an assessment would lose the fact that the analysis ran at
+    all. Neither Bid Qualification Reason column is touched, so the analyzer's
+    system reason and the team's manual notes both survive.
     """
     now_iso = run_dt.isoformat()
     ts = run_dt.strftime("%Y-%m-%d %H:%M")
@@ -82,12 +90,16 @@ def _build_row_update(tender, brief, run_dt, report_url="") -> dict:
         value = report_url if attr == "report_url" else getattr(brief, attr, "")
         update[column] = value
 
+    if mark_done:
+        update[STATUS_FIELD] = COMPLETED_STATUS
+
     # Comments stays an append-only log (oldest first), same convention as the
     # analyzer so one column reads as a single history of everything that has
     # happened to the row.
     entry = (
         f"[{ts}] Detailed analysis: {brief.likelihood_summary}"
         f"{' — ' + report_url if report_url else ''}"
+        f"{f' | {STATUS_FIELD} set to {COMPLETED_STATUS}' if mark_done else ''}"
     )
     prior_comments = tender.data.get("Comments", "")
     update["Comments"] = f"{prior_comments}\n{entry}" if prior_comments else entry
@@ -127,7 +139,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
 
     summary = {"eligible": 0, "analysed": 0, "skipped": 0, "errors": 0,
                "written": 0, "reports": 0, "report_errors": 0,
-               "Bid": 0, "TBD": 0, "NoBid": 0, "report_refs": [],
+               "Bid": 0, "TBD": 0, "NoBid": 0, "marked_done": 0, "report_refs": [],
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -218,7 +230,24 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                 logger.error(f"Row {tender.row}: report write failed: {e}")
                 summary["report_errors"] += 1
 
-        updates.append((tender.row, _build_row_update(tender, brief, run_dt, report_url)))
+        # Mark the row done only when there is something to show for it. A report
+        # failure (Drive permissions, a transient 5xx) leaves the status alone so
+        # the next run retries the tender, rather than taking it out of scope with
+        # no brief anywhere.
+        mark_done = MARK_COMPLETE and not dry_run
+        if mark_done and MARK_COMPLETE_REQUIRES_REPORT and REPORTS_ENABLED and not report_url:
+            mark_done = False
+            logger.warning(
+                f"Row {tender.row}: not marking {COMPLETED_STATUS} — no report was "
+                f"written, so the row stays in scope for the next run"
+            )
+        if mark_done:
+            summary["marked_done"] += 1
+
+        updates.append((
+            tender.row,
+            _build_row_update(tender, brief, run_dt, report_url, mark_done),
+        ))
 
     if updates and WRITE_BACK_ENABLED and not dry_run:
         summary["written"] = client.write_updates(updates)
@@ -248,6 +277,8 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
     logger.info(f"  Errors        : {summary['errors']}")
     logger.info(f"  Rows written  : {summary['written']}"
                 f"{'' if summary['write_back_enabled'] else ' (write-back disabled)'}")
+    logger.info(f"  Marked {COMPLETED_STATUS:<7}: {summary['marked_done']}"
+                f" (out of scope for future runs)")
     logger.info("=" * 80)
     return summary
 
@@ -318,6 +349,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         ("Likelihood LOW (implies NoBid)", s.get("NoBid", 0)),
         ("Reports built", s.get("reports", 0)),
         ("Report errors", s.get("report_errors", 0)),
+        (f"Marked {COMPLETED_STATUS} (now out of scope)", s.get("marked_done", 0)),
         ("Skipped (no title / description)", s.get("skipped", 0)),
         ("Errors", s.get("errors", 0)),
         ("Rows written", s.get("written", 0)),
