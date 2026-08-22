@@ -152,6 +152,14 @@ A tender with no folder, an empty folder, an unreadable document or a Drive outa
 degrades to the notice summary and the corpus, and the prompt is told the pack was
 unavailable so the brief says so rather than inferring an answer.
 
+**A read failure is treated as retryable, not as a fact about the document.** Such
+a run is not cached, and the row is not marked `Done`
+(`MARK_COMPLETE_REQUIRES_FULL_PACK`), so a later run redoes it against the full
+pack. Both guards come from one measured incident: a run whose `pypdf` import
+failed briefed a tender from 2 of its 4 documents, cached that as the pack's
+settled state, wrote the report and marked the row `Done` — the PDF was fine and
+the import worked minutes later, but the row was out of scope for good.
+
 Log: `DetailedAnalyzer/detailed_analyzer.log` (also echoed to console). Covered
 by the root `.gitignore`'s `*.log`.
 

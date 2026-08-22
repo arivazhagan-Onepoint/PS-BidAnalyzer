@@ -358,6 +358,18 @@ LINK_FIELDS = (SYSTEM_REASON_FIELD, "Comments")
 # next run to retry.
 MARK_COMPLETE_REQUIRES_REPORT = True
 
+# Same reasoning, one level up: a document in the pack that could not be read
+# means the brief was written against an incomplete evidence base. The report is
+# still produced — it is worth having, and its manifest names what was missing —
+# but the row stays in scope so a later run redoes it against the full pack.
+#
+# Measured 2026-08-23: a run whose pypdf import failed briefed a tender from 2 of
+# its 4 documents, wrote that report, and marked the row Done. Nothing was wrong
+# with the missing PDF and the import worked minutes later, but the row was out of
+# scope for good and only the manifest recorded the gap. A read failure is almost
+# never a property of the document, so it is worth one retry.
+MARK_COMPLETE_REQUIRES_FULL_PACK = True
+
 # Optional belt-and-braces: a column that, when non-empty, takes a row out of
 # scope regardless of status. Not needed now that COMPLETED_STATUS moves the row
 # out on its own; set it if you later want the status and the completion mark to

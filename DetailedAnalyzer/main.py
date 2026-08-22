@@ -34,6 +34,7 @@ from .config import (
     COMPLETED_STATUS,
     MARK_COMPLETE,
     MARK_COMPLETE_REQUIRES_REPORT,
+    MARK_COMPLETE_REQUIRES_FULL_PACK,
     SYSTEM_REASON_FIELD,
     LINK_FIELDS,
     REPORTS_ENABLED,
@@ -262,6 +263,18 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
             logger.warning(
                 f"Row {tender.row}: not marking {COMPLETED_STATUS} — no report was "
                 f"written, so the row stays in scope for the next run"
+            )
+        # A brief built without part of its pack keeps its report — it is worth
+        # having, and the manifest names the gap — but the row stays in scope so a
+        # later run can redo it against the full evidence base.
+        unread = [d for d in brief.documents.documents if d.error]
+        if mark_done and MARK_COMPLETE_REQUIRES_FULL_PACK and unread:
+            mark_done = False
+            logger.warning(
+                f"Row {tender.row}: not marking {COMPLETED_STATUS} — "
+                f"{len(unread)} pack document(s) could not be read "
+                f"({', '.join(d.name for d in unread[:3])}), so the brief is based "
+                f"on an incomplete evidence base and the row stays in scope"
             )
         if mark_done:
             summary["marked_done"] += 1

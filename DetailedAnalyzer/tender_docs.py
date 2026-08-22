@@ -608,9 +608,24 @@ def load_tender_documents(tender_data: dict) -> TenderDocuments:
         f"document(s), {result.total_chars:,} chars"
     )
 
-    try:
-        _write_cache(result, fingerprint)
-    except OSError as e:
-        logger.warning(f"  could not cache the tender pack: {e}")
+    # Only a clean read is cached. A failure is not a property of the document —
+    # it can be a missing dependency, an expired token or a transient 5xx — and the
+    # fingerprint covers only the files and the settings, so a cached error would be
+    # served on every later run until someone happened to edit the pack in Drive.
+    # Measured the hard way: a run whose pypdf import failed cached "NOT READ" for a
+    # perfectly readable PDF, and kept reporting it after the import worked again.
+    # Re-reading a genuinely unreadable document costs one download per run, which
+    # is far cheaper than silently dropping it from the evidence base for good.
+    if unreadable:
+        logger.info(
+            f"  not caching this pack — {len(unreadable)} document(s) failed to "
+            f"read, and the next run should retry them rather than inherit the "
+            f"failure"
+        )
+    else:
+        try:
+            _write_cache(result, fingerprint)
+        except OSError as e:
+            logger.warning(f"  could not cache the tender pack: {e}")
 
     return result
