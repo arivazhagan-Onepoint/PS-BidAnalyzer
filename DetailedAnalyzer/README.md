@@ -5,11 +5,12 @@ Second-stage analysis for the PS BidAnalyzer Tool. Where `analyzer/` answers
 the tenders that cleared that gate and produces the written brief a bid team can
 work from.
 
-> **Status: scaffold.** The infrastructure is complete and runnable — config,
-> logging, sheet read, row selection, the Gemini call with retries, write-back,
-> summary email. The **prompt and the output columns are not settled**; every
-> such spot is marked `TODO` in the code. Write-back ships disabled, so a run
-> today is read-only.
+> **Status: running for real.** Reports are written to Drive, the tracker is
+> written back, and an analysed row moves `Docs(Ready)` → `Done` so it leaves
+> scope. What remains optional is `OUTPUT_FIELD_MAP` — the likelihood and report
+> link reach the tracker through the `Bid Qualification Reason(System)` and
+> `Comments` log entries, and only land in columns of their own once those columns
+> are added to the sheet by hand and mapped.
 
 ## How it works
 
@@ -21,12 +22,19 @@ project_config.json ──▶ SheetsClient.read_tenders()
                               │  and not already_detailed()
                               ▼
                         analyse_tender_detail(tender.data)
-                              │  Gemini · shared Onepoint capability context
+                              │  Gemini, over three evidence streams:
+                              │    · capability context  (shared, hand-authored)
+                              │    · source corpus       (Onepoint's own records)
+                              │    · tender pack         (this tender's documents)
+                              │  + deterministic fields from the row and the clock
                               ▼
-                        TenderDetail(summary, detail)
+                        TenderBrief(fields, fit_dimensions, likelihood, documents)
+                              ├──▶ ReportWriter.write()      ← gated on REPORTS_ENABLED
+                              │      copy of the template, filled, in Drive
                               ▼
                         SheetsClient.write_updates()   ← gated on WRITE_BACK_ENABLED
-   updates: OUTPUT_FIELD_MAP columns + [Comments] [Processed Date] [Last Modified Date]
+   updates: Bid Qualification → Done · [Bid Qualification Reason(System)]
+            [Comments] [Processed Date] [Last Modified Date] + OUTPUT_FIELD_MAP
 ```
 
 ## Files
@@ -34,6 +42,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
 | File | Responsibility |
 |------|----------------|
 | `sources.py` | **Ingestion layer** — reads Onepoint's Drive source sheets, strips PII, renders the corpus. Own entry point. |
+| `tender_docs.py` | **The tender's own pack** — finds its Drive folder by OCID, extracts the documents, drops superseded versions, caps the total. |
 | `main.py` | Orchestration: read sheet → select → analyse → write back → email. Entry point. |
 | `detailed_analyzer.py` | Core `analyse_tender_detail()` — prompt, Gemini call, retries, result. |
 | `config.py` | Model budget, scope, output mapping, write-back switch. Re-exports the root `config.py`. |
@@ -93,39 +102,92 @@ director's home address. The structural filter removes the personal one.
 The corpus cache is **gitignored** — unreleased commercial evidence, even after
 PII stripping.
 
+## Tender documents
+
+The third evidence stream, after the capability context and the source corpus.
+Those two describe Onepoint and are identical for every tender; this one is the
+buyer's own published pack for **one** tender — the ITT, the draft contract, the
+code of conduct — and it is what turns "Mandatory Requirement" from an inference
+off a scraped notice into a statement of what a bid is evaluated against.
+
+Source is the Drive folder in `config.TENDER_DOCS_FOLDER_ID`, holding one
+subfolder per tender named `<OCID>-<Tender Title>`. Matching is on the **OCID
+prefix alone** — it is the OCDS global identifier, stable and distinct across all
+529 tracker rows, whereas the title half gets reworded. That also excludes the
+placeholder `Sample Tender #…` folders without needing to name them.
+
+Fetched **per row during the run**, not on the corpus's cadence: a pack belongs to
+its tender. Extracted text is cached per OCID under `knowledge/tender_docs/`
+(gitignored — these are the buyer's documents, usually under the ITT's own
+confidentiality terms), invalidated by a fingerprint over each file's id, size and
+`modifiedTime` **plus the settings that shape the text**, so raising the cap
+rebuilds rather than silently serving text truncated under the old one.
+
+Three decisions here are behaviour, each measured on the real CITB pack
+(2026-08-23):
+
+| Decision | Why |
+|---|---|
+| Text comes from the **downloaded bytes** (`.docx` via stdlib `zipfile`+XML, `.pdf` via `pypdf`), never by converting a copy in Drive | Conversion works but takes ~29s/file against ~3s, and the copy lands in the customer's own folder where the service account holds `canEdit` but **not** `canDelete`/`canTrash`. The strays would then be re-ingested as tender documents on the next run |
+| Superseded versions detected by **word 5-gram Jaccard ≥ 0.90**, not `difflib` | Measured: same document 0.9896, unrelated documents 0.0001–0.0011 — a ~900× margin, in 6ms. `difflib.ratio()` separates correctly but costs ~7 minutes across the pack; its cheap `quick_ratio()` scores two unrelated documents at 0.90 |
+| Which copy wins is the **filename version marker**, never a timestamp | Both timestamps are unusable here: `modifiedTime` is *identical* for the two ITTs, and `createdTime` has v2 created 1.5s **before** v1 — "newest wins" would confidently keep the stale document |
+
+Where no marker separates two copies, **both are kept and the run warns** rather
+than a coin being flipped on contract terms — the same refusal to guess as
+`report_writer._prefix_match`.
+
+Over `TENDER_DOCS_MAX_TOTAL_CHARS`, documents are capped to a common ceiling
+rather than dropped, so short ones survive whole and only the largest are cut; a
+cut is stated in the prompt text and the manifest, never silent. The cap is a
+backstop against a pathological pack, not a trimming budget — an ordinary
+three-document pack must fit whole.
+
+Every brief records its **evidence base**: which documents were read, their sizes,
+and anything superseded, truncated or unreadable. It goes to the run log, the
+dry-run render and the summary email. To have it in the report as well, add a row
+to the template whose column A reads `Documents Reviewed` and point
+`TENDER_DOCS_MANIFEST_FIELD` at it.
+
+A tender with no folder, an empty folder, an unreadable document or a Drive outage
+degrades to the notice summary and the corpus, and the prompt is told the pack was
+unavailable so the brief says so rather than inferring an answer.
+
 Log: `DetailedAnalyzer/detailed_analyzer.log` (also echoed to console). Covered
 by the root `.gitignore`'s `*.log`.
 
 ## What it deliberately does not do
 
-- **Never writes `Bid Qualification`** or either `Bid Qualification Reason`
-  column. The qualification is the analyzer's to set; the human reason is the
-  team's. This stage adds to `Comments` and its own columns only.
-- **Never creates a tab or column.** The sheet's structure is maintained by
-  hand; an unmapped column is skipped with a warning.
+- **Never writes `Bid Qualification Reason(Human)`.** The team's manual notes are
+  theirs. The stage prepends to `Bid Qualification Reason(System)` and appends to
+  `Comments`, both shared append-only logs, so the two stages interleave into one
+  history rather than keeping two rival ones.
+- **Never creates a tab, column or Drive file outside the reports folder.** The
+  sheet's structure is maintained by hand; an unmapped column is skipped with a
+  warning. Notably this is why tender documents are parsed from downloaded bytes
+  rather than converted in Drive.
+- **Never writes a failed analysis as though it were an assessment.** A flagged
+  result is counted as an error; no report is created and no row is updated.
 - **No knowledge-maintenance flow.** The analyzer has one
   (`maintain_knowledge.py`) because its precedent is distilled from human
-  decisions. Nothing equivalent exists for this stage yet, so no such file was
-  scaffolded.
+  decisions. Nothing equivalent exists for this stage.
 
-## Before this can run for real
+It *does* write `Bid Qualification` (`Docs(Ready)` → `Done`), reversing an earlier
+note — which follows from `Docs(Ready)` being the gate: whatever consumes a
+workflow status has to be what advances it.
 
-1. ~~Confirm the scope~~ — settled: `PROCESS_STATUSES` is `{Bid(AI),
-   Bid(Human)}`. The bare `Bid` is excluded because it carries no attribution as
-   to who decided it; requiring the suffix means a row only reaches this stage
-   once a machine or a person has owned that call.
-2. **Decide the exit condition** — set `ALREADY_DETAILED_FIELD` to the column
-   that marks a row as done. Without it, every run re-analyses every Bid row,
-   because this stage does not change the status the way the analyzer does.
-3. **Add the output column(s)** to the PS Tender Tracker by hand, then map them
-   in `OUTPUT_FIELD_MAP`.
-4. **Tune the prompt** — `_SYSTEM_PROMPT`, `CONTEXT_FIELDS` and the five-section
-   brief in `_build_prompt()` are a starting shape, not an agreed one. Settle the
-   section list with the bid team, since it decides what every future brief
-   contains.
-5. **Flip `WRITE_BACK_ENABLED`** to `True`.
+## Still open
 
-Two constraints worth keeping through all of that: capability claims are grounded
-**only** on `onepoint_capabilities.md` (the same wall the analyzer enforces), and
-a failed analysis returns a flagged placeholder that is counted as an error and
-**never written to the sheet** as though it were an assessment.
+1. **`OUTPUT_FIELD_MAP` is empty.** Add columns for the likelihood score and the
+   report link to the tracker by hand, then map them. Until then both live in the
+   report, the email and the log entries only.
+2. **`TENDER_DOCS_MANIFEST_FIELD` is `None`.** Add a `Documents Reviewed` row to
+   the reporting template to have each brief carry its evidence base.
+3. **`DETAIL_MAX_TOKENS` is 4000**, never tested against a brief that needs more.
+   A truncated reply shows as `finish_reason=MAX_TOKENS`.
+4. **`main()` emails on `--dry-run` too.** Call `run()` directly to test without
+   mailing anyone.
+
+One constraint worth keeping through all of that: capability claims are grounded
+**only** on `onepoint_capabilities.md` — the same wall the analyzer enforces. The
+corpus and the tender pack are evidence *about* a requirement or *behind* a
+capability; neither may substitute for that file in deciding what Onepoint can do.

@@ -8,3 +8,6 @@ google-auth-httplib2==0.4.0
 google-api-python-client==2.196.0
 pytz==2025.2
 holidays==0.98
+# Tender-pack PDF text extraction (DetailedAnalyzer.tender_docs). .docx needs no
+# dependency — it is a zip of XML, read with the standard library.
+pypdf==6.16.1

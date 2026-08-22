@@ -13,6 +13,7 @@ Division of labour, and the reason for it:
     location, time remaining, urgency…) are filled from the tracker row and the
     clock, never by the model. A hallucinated submission deadline is the most
     expensive error this tool could make, and there is no reason to risk it on
+
     data already in hand.
   * The 29 derived fields are asked of the model as one JSON object, so a partial
     reply fails loudly on parse rather than half-filling a brief a human will
@@ -40,10 +41,12 @@ from .config import (
     DETAIL_MAX_RETRIES,
     API_THROTTLE_SECONDS,
     UK_TIMEZONE,
+    TENDER_DOCS_MANIFEST_FIELD,
 )
 from .gemini_client import get_client
 from .onepoint_context import load_onepoint_context
 from .sources import load_corpus
+from .tender_docs import load_tender_documents, TenderDocuments
 from . import template as tpl
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,10 @@ class TenderBrief:
     analysis_date: str
     raw: dict = field(default_factory=dict)
     analysis_failed: bool = False
+    # The document pack this brief was built from. Carried on the result so the
+    # run log, the email and the report can all state the evidence base — an
+    # assessment whose sources are invisible cannot be checked.
+    documents: TenderDocuments = field(default_factory=TenderDocuments)
 
     @property
     def likelihood_summary(self) -> str:
@@ -155,7 +162,8 @@ def _timeline_block(deterministic: dict) -> str:
 
 
 def _build_prompt(title: str, description: str, facts: str, context: str,
-                  corpus: str = "", timeline: str = "") -> str:
+                  corpus: str = "", timeline: str = "", pack: str = "",
+                  pack_absent_note: str = "") -> str:
     """Assemble the prompt asking for every derived field in the template."""
     context_block = context if context else "(No Onepoint capability context provided.)"
 
@@ -176,6 +184,30 @@ gap in Onepoint's evidence:
 ---
 """
 
+    # The tender's own published pack. Framed as authoritative over the notice
+    # summary — the tracker row is a scraped abstract, the pack is the document a
+    # bid is actually evaluated against — but explicitly NOT over the computed
+    # timeline, or the model starts reading dates out of the ITT's own text and the
+    # bug fixed by stating the timeline separately comes straight back.
+    pack_block = ""
+    if pack:
+        pack_block = f"""
+The tender pack for THIS tender — the buyer's own published documents, read from
+Onepoint's Drive. This is the authoritative statement of what is being asked for:
+where it and the tender summary above disagree about requirements, scope, or
+evaluation, THE PACK WINS and the summary is treated as an abstract of it. Quote
+specifics from it — mandatory requirements, evaluation weightings, certifications,
+insurance and SLA terms — rather than describing them in general terms. Two
+limits: the computed timeline below remains authoritative for dates, and a
+document shown as truncated is incomplete, so do not read the absence of something
+in it as evidence that the pack is silent on that point:
+---
+{pack}
+---
+"""
+    elif pack_absent_note:
+        pack_block = f"\n{pack_absent_note}\n"
+
     # The derived field labels are emitted from template.py rather than retyped,
     # so the prompt cannot drift out of step with the template it fills.
     derived = tpl.derived_fields()
@@ -185,7 +217,7 @@ gap in Onepoint's evidence:
 ---
 {context_block}
 ---
-{corpus_block}
+{corpus_block}{pack_block}
 Tender under review:
 Title: {title}
 Description: {description}
@@ -225,6 +257,28 @@ documented evidence" rather than omitting one:
 }}"""
 
 
+def _has_money_figure(value: str) -> bool:
+    """True when a money cell holds a real, non-zero amount.
+
+    The tracker's unfilled contract-value columns are not all written "0": the CITB
+    row holds "GBP 0.00", which an equality test against ("0", "£0", "0.00") let
+    straight through, so the brief reported the budget as "GBP 0.00 (total contract
+    value)" — a genuine zero-value contract rather than a column nobody filled in.
+    The same trap MONEY_ZERO_VALUES guards in the corpus, defended the same way:
+    strip the currency and separators, then look at the number.
+
+    A placeholder with no digits at all ("TBC", "N/A") is likewise not a figure,
+    matching how PLACEHOLDER_VALUES treats it during ingestion.
+    """
+    number = re.sub(r"[^\d.]", "", (value or "").strip())
+    if not number:
+        return False
+    try:
+        return float(number) != 0.0
+    except ValueError:
+        return False
+
+
 def _deterministic_fields(tender_data: dict, run_dt: datetime) -> dict:
     """Fill the template rows that come from the tracker row or the clock.
 
@@ -251,9 +305,9 @@ def _deterministic_fields(tender_data: dict, run_dt: datetime) -> dict:
             if label == "Budget (Max/Indicative)":
                 total = (tender_data.get("Total Contract Value", "") or "").strip()
                 annual = (tender_data.get("Annual Contract Value", "") or "").strip()
-                if total and total not in ("0", "£0", "0.00"):
+                if _has_money_figure(total):
                     value = f"{total} (total contract value)"
-                elif annual and annual not in ("0", "£0", "0.00"):
+                elif _has_money_figure(annual):
                     value = f"{annual} (annual contract value)"
                 else:
                     value = ""
@@ -355,8 +409,21 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
 
     context = load_onepoint_context()
     corpus = load_corpus()
+
+    # The tender's own pack, if one has been uploaded for it. Fetched per row —
+    # unlike the corpus, it belongs to this tender rather than to Onepoint.
+    pack_docs = load_tender_documents(tender_data)
+    pack_absent_note = "" if pack_docs.used else (
+        "No tender pack was available for this tender — no documents have been "
+        "uploaded for it, so this assessment rests on the tender summary above "
+        "alone. Say so where a question can only be answered from the tender "
+        "documents (evaluation weightings, mandatory requirements, contractual "
+        "terms) rather than inferring an answer."
+    )
+
     prompt = _build_prompt(title, description, _format_tender_facts(tender_data),
-                           context, corpus, _timeline_block(deterministic))
+                           context, corpus, _timeline_block(deterministic),
+                           pack_docs.as_prompt_block(), pack_absent_note)
 
     last_error = None
     for attempt in range(1, DETAIL_MAX_RETRIES + 1):
@@ -392,7 +459,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
                 )
 
             result = _parse_response(raw)
-            return _to_brief(result, deterministic, date_str)
+            return _to_brief(result, deterministic, date_str, pack_docs)
 
         except Exception as e:
             last_error = e
@@ -416,11 +483,12 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
             f"attempts ({last_error}). No assessment was produced — this is not a "
             f"judgement on the opportunity."
         ),
-        analysis_date=date_str, analysis_failed=True,
+        analysis_date=date_str, analysis_failed=True, documents=pack_docs,
     )
 
 
-def _to_brief(result: dict, deterministic: dict, date_str: str) -> TenderBrief:
+def _to_brief(result: dict, deterministic: dict, date_str: str,
+              pack_docs: TenderDocuments = None) -> TenderBrief:
     """Assemble a TenderBrief from the model's reply plus the filled-in facts.
 
     Every derived label the template expects is accounted for: a key the model
@@ -473,25 +541,57 @@ def _to_brief(result: dict, deterministic: dict, date_str: str) -> TenderBrief:
             f"expects at least {tpl.SECTION_3_MIN_DIMENSIONS}"
         )
 
+    pack_docs = pack_docs if pack_docs is not None else TenderDocuments()
+
+    # The evidence base goes in the report only when the template has a row for it
+    # — the sheet's structure is maintained by hand, so an unconfigured label would
+    # warn on every run about a row nobody has added.
+    if TENDER_DOCS_MANIFEST_FIELD:
+        lines = pack_docs.manifest_lines()
+        fields[TENDER_DOCS_MANIFEST_FIELD] = (
+            "\n".join(lines) if lines
+            else "No tender documents were available; assessed on the tender summary alone."
+        )
+
     recommendation = fields.get("Recommendation", "").strip()
     logger.info(
         f"Brief complete: likelihood {pct:.0f}% ({band}), "
         f"{len(dims)} fit dimension(s), {len(tpl.derived_fields()) - len(missing)}"
-        f"/{len(tpl.derived_fields())} fields answered"
+        f"/{len(tpl.derived_fields())} fields answered, "
+        f"{len(pack_docs.used)} document(s) in evidence"
     )
     return TenderBrief(
         fields=fields, fit_dimensions=dims, likelihood_pct=pct,
         likelihood_band=band, recommendation=recommendation,
-        analysis_date=date_str, raw=result,
+        analysis_date=date_str, raw=result, documents=pack_docs,
     )
 
 
 def _parse_response(raw: str) -> dict:
-    """Parse the model's JSON reply, tolerating markdown code-fence wrapping."""
-    text = raw
+    """Parse the model's JSON reply, tolerating fencing and trailing commentary.
+
+    ``raw_decode`` takes the first complete JSON value and ignores whatever
+    follows, rather than failing the whole reply the way ``json.loads`` does. The
+    model does sometimes append a sentence after the closing brace — measured on
+    the first pack-fed run, which failed with "Extra data: line 40 column 1" and
+    only succeeded on retry. With a tender pack in the prompt a retry re-sends
+    ~100k tokens, so salvaging a reply that is complete but chatty is worth more
+    here than it was before.
+    """
+    text = raw.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
         text = text.strip()
-    return json.loads(text)
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object in the reply")
+    result, end = json.JSONDecoder().raw_decode(text, start)
+    trailing = text[end:].strip()
+    if trailing:
+        logger.warning(
+            f"Ignored {len(trailing)} char(s) of commentary after the JSON reply: "
+            f"{trailing[:120]!r}"
+        )
+    return result

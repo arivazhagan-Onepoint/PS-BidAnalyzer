@@ -328,6 +328,16 @@ def render_markdown(brief, heading: str = "") -> str:
     Walks the template in its own order so the text and the spreadsheet agree.
     """
     lines = [f"# {heading or 'Detailed analysis'}", ""]
+
+    docs = getattr(brief, "documents", None)
+    if docs is not None:
+        manifest = docs.manifest_lines()
+        lines.append(f"## Evidence base — {docs.folder_name or 'no tender pack'}")
+        lines.append("")
+        lines += ([f"- {line}" for line in manifest] or
+                  ["- _No tender documents; assessed on the tender summary alone._"])
+        lines += [f"- ⚠️ {w}" for w in docs.warnings]
+
     for section, label, kind, _src in tpl.section_rows():
         if section:
             lines += ["", f"## {section}", ""]

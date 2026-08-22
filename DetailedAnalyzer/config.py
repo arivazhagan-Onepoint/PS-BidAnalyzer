@@ -182,6 +182,124 @@ DEDUPE_IDENTICAL_TABS = True
 # signature block that is nothing but contact fields.
 SKIP_TABS = ("read me", "declaration")
 
+# --- Tender documents: the buyer's own pack, per tender ---------------------
+# The third evidence stream, after the capability context and the source corpus.
+# Those two describe Onepoint and are the same for every tender; this one is the
+# tender's own published pack — the ITT, the draft contract, the code of conduct —
+# and it is what turns "Mandatory Requirement" from a guess off the notice summary
+# into a quotation from the document a bid would be evaluated against.
+#
+# Deliberately NOT part of sources.py. That corpus is tender-independent and
+# cached on its own cadence; a pack arrives with its tender, so it is fetched
+# during the run, per row.
+TENDER_DOCS_FOLDER_ID = "16wMwZ_VpJ0GkhoCEUMpWqoqjPfq5QdW3"   # "Tender Documents"
+TENDER_DOCS_ENABLED = True
+
+# Subfolder per tender, named "<OCID>-<Tender Title>". Matched on the OCID prefix
+# ALONE: it is the OCDS global identifier, stable and verified distinct across all
+# 529 tracker rows, whereas the title half gets reworded and truncated. Matching
+# on OCID also means the folder's title half can say anything without breaking the
+# lookup — and the "Sample Tender #XXX" folders, which carry no OCID, are excluded
+# for free rather than needing a skip-list.
+TENDER_DOCS_MATCH_FIELD = "OCID"
+
+# Extracted text, one file per tender, keyed by OCID. Cached for the same reason
+# the corpus is: the exact text sent to the model stays on disk to be audited, and
+# a retried or re-run tender does not re-download and re-parse its whole pack.
+# Invalidated by a fingerprint over each file's id, size and modifiedTime, so a
+# replaced or added document rebuilds it.
+#
+# GITIGNORED: a live tender pack is the buyer's material, often under the ITT's own
+# confidentiality terms. It must not enter git history.
+TENDER_DOCS_CACHE_DIR = os.path.join(KNOWLEDGE_DIR, "tender_docs")
+
+# What can be read. Text is extracted from the downloaded bytes — NOT by converting
+# in Drive. Measured 2026-08-23: converting a copy to a Google Doc and exporting it
+# works, but takes ~29s per file against ~3s locally, and the copy lands in the
+# tender's own folder where the service account CANNOT remove it (it holds
+# canEdit but not canDelete/canTrash on that shared drive). Those leftovers would
+# then be re-ingested as tender documents on the next run.
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PDF_MIME  = "application/pdf"
+GDOC_MIME = "application/vnd.google-apps.document"
+TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, PDF_MIME, GDOC_MIME)
+
+# Total characters of pack text allowed into one prompt, across all documents.
+#
+# 400k chars is ~100k tokens, which with the corpus (~18k) and the capability
+# context (~3k) sits far inside the model's context. The cap is a backstop against
+# a pathological pack, NOT a trimming budget: the CITB pack is 194k chars once its
+# superseded ITT is dropped, and a first attempt at 120k truncated all three of
+# its real documents — an ordinary three-document pack must fit whole, or the
+# feature silently degrades into summarising fragments.
+#
+# Over the cap, documents are capped to a common ceiling rather than dropped, so
+# short documents survive intact and only the largest are cut; dropping a 33k
+# code of conduct to fit a 90k contract would be the wrong trade. A cut is always
+# stated in the prompt text and the manifest, never silent.
+TENDER_DOCS_MAX_TOTAL_CHARS = 400_000
+TENDER_DOCS_MIN_DOC_CHARS = 2_000   # never cap a document below this
+
+# --- Superseded versions ----------------------------------------------------
+# A pack routinely holds both "X ITT.docx" and "X ITT v2.docx". Measured on the
+# CITB pack: those two are 98.96% identical but differ SUBSTANTIVELY — one deletes
+# the "4 (four) x 1 (one) year extensions" term and changes several evaluation
+# figures. Feeding both hands the model contradictory contract terms, and, by the
+# same reasoning behind DEDUPE_IDENTICAL_TABS, makes duplicated evidence read as
+# stronger evidence.
+TENDER_DOCS_DEDUPE_ENABLED = True
+
+# Detection is word-shingle Jaccard, NOT difflib. Measured across the real pack:
+#
+#   metric                      same document    unrelated documents    cost
+#   difflib ratio()                    0.9988        0.0477 - 0.0863    ~7 min
+#   difflib quick_ratio()              0.9995        0.4833 - 0.8966    instant
+#   5-gram Jaccard                     0.9896        0.0001 - 0.0011    6 ms
+#
+# difflib's exact ratio separates correctly but costs minutes per pair; its cheap
+# quick_ratio scores two entirely unrelated documents at 0.90, because it compares
+# character counts and ignores order. Jaccard leaves a ~900x margin between the two
+# populations at a fraction of the cost, so the threshold sits nowhere near
+# anything.
+TENDER_DOCS_SIMILARITY_THRESHOLD = 0.90
+TENDER_DOCS_SHINGLE_WORDS = 5
+
+# Which copy wins, once a pair is known to be the same document.
+#
+# NOT the timestamps. Measured on this pack, both are unusable: modifiedTime is
+# IDENTICAL for the two ITTs (it is the source file's mtime, preserved through a
+# single upload batch), and createdTime is Drive upload order, which has v2
+# created 1.5 SECONDS BEFORE v1 — so "newest wins" would confidently keep the
+# stale document. The filename marker is the only signal in the data that is
+# actually about the document rather than about how it reached Drive.
+#
+# A name with no marker at all is treated as version 1, so "ITT v2" beats "ITT".
+TENDER_DOCS_VERSION_PATTERNS = (
+    r"\bv(?:er(?:sion)?)?\s*[._-]?\s*(\d+(?:\.\d+)*)\b",   # v2, v2.1, ver 3, version 4
+    r"\brev(?:ision)?\s*[._-]?\s*(\d+)\b",                 # rev 2, revision 3
+    r"\bissue\s*[._-]?\s*(\d+)\b",                         # issue 2
+)
+TENDER_DOCS_IMPLIED_VERSION = 1.0
+
+# When no marker separates two copies of the same document, BOTH are kept and the
+# run warns. Picking one would be a coin flip on contract terms; the same refusal
+# to guess is already in report_writer._prefix_match, for the same reason — a brief
+# that looks complete and states something false is worse than a flagged gap.
+TENDER_DOCS_WARN_UNRESOLVED = True
+
+# --- The document manifest --------------------------------------------------
+# Every brief records which documents it was built from — names, sizes, and
+# anything superseded, truncated or unreadable. An assessment whose evidence base
+# is invisible cannot be checked, which is the same reason the corpus text is
+# cached on disk rather than only ever existing inside a prompt.
+#
+# Always written to the run log and the summary email. To have it land in the
+# report as well, add a row to the reporting template whose column A reads
+# "Documents Reviewed" (the sheet's structure is maintained by hand) and set this
+# to that label; leave it None and no report row is attempted, so no run warns
+# about a template row that was never added.
+TENDER_DOCS_MANIFEST_FIELD = None
+
 # --- Which rows get a detailed analysis -------------------------------------
 # Confirmed 2026-08-21: scope is the single status 'Docs(Ready)'. Compared
 # case-insensitively after trimming.

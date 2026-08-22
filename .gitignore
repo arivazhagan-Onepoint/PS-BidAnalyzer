@@ -16,6 +16,11 @@ analyzer/knowledge/bid_patterns.md
 # compliance answers) even after PII stripping.
 DetailedAnalyzer/knowledge/onepoint_corpus.md
 
+# Extracted tender packs, cached per OCID by DetailedAnalyzer.tender_docs.
+# Never commit: these are the buyers' own documents, routinely covered by the
+# confidentiality terms of the ITT they came from.
+DetailedAnalyzer/knowledge/tender_docs/
+
 # Logs
 *.log
 

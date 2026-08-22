@@ -149,6 +149,8 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
     summary = {"eligible": 0, "analysed": 0, "skipped": 0, "errors": 0,
                "written": 0, "reports": 0, "report_errors": 0,
                "Bid": 0, "TBD": 0, "NoBid": 0, "marked_done": 0, "report_refs": [],
+               "with_docs": 0, "without_docs": 0, "docs_read": 0,
+               "doc_warnings": [],
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -217,8 +219,19 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         summary[family] = summary.get(family, 0) + 1
         logger.info(
             f"  → {brief.likelihood_summary}, implies {family}; "
-            f"{len(brief.fit_dimensions)} fit dimension(s)"
+            f"{len(brief.fit_dimensions)} fit dimension(s); "
+            f"{len(brief.documents.used)} document(s) in evidence"
         )
+
+        # Roll the evidence base up for the email. A brief built without the
+        # tender's pack is a weaker brief, and the run should say how many were.
+        if brief.documents.used:
+            summary["with_docs"] += 1
+            summary["docs_read"] += len(brief.documents.used)
+        else:
+            summary["without_docs"] += 1
+        for warning in brief.documents.warnings:
+            summary["doc_warnings"].append(f"{title[:60]}: {warning}")
 
         report_url = ""
         if dry_run:
@@ -279,6 +292,10 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
     logger.info(f"  Analysed      : {summary['analysed']}")
     logger.info(f"  Bid / TBD / NoBid (implied) : "
                 f"{summary['Bid']} / {summary['TBD']} / {summary['NoBid']}")
+    logger.info(f"  With pack     : {summary['with_docs']} "
+                f"({summary['docs_read']} document(s) read)")
+    logger.info(f"  Without pack  : {summary['without_docs']} "
+                f"(assessed on the tender summary alone)")
     logger.info(f"  Reports built : {summary['reports']}"
                 f"{'' if summary['reports_enabled'] else ' (reports disabled)'}")
     logger.info(f"  Report errors : {summary['report_errors']}")
@@ -356,6 +373,9 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         ("Likelihood HIGH/VERY HIGH (implies Bid)", s.get("Bid", 0)),
         ("Likelihood MEDIUM (implies TBD)", s.get("TBD", 0)),
         ("Likelihood LOW (implies NoBid)", s.get("NoBid", 0)),
+        ("Analysed with the tender pack", s.get("with_docs", 0)),
+        ("Analysed on the notice alone (no pack uploaded)", s.get("without_docs", 0)),
+        ("Tender documents read", s.get("docs_read", 0)),
         ("Reports built", s.get("reports", 0)),
         ("Report errors", s.get("report_errors", 0)),
         (f"Marked {COMPLETED_STATUS} (now out of scope)", s.get("marked_done", 0)),
@@ -400,6 +420,19 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         if sheet_url else ""
     )
 
+    # Anything wrong with a tender's pack — an unreadable document, an unresolved
+    # pair of versions, a truncation — is a caveat on the brief that was produced,
+    # not a run error, so it is surfaced beside the metrics rather than buried in
+    # the log where nobody reads it.
+    doc_warnings = s.get("doc_warnings") or []
+    doc_warning_block = ""
+    if doc_warnings:
+        items = "".join(f"<li>{html_escape(w)}</li>" for w in doc_warnings)
+        doc_warning_block = f"""\
+  <h3 style="margin:16px 0 4px;font-size:15px">Tender pack caveats ({len(doc_warnings)})</h3>
+  <ul style="font-size:13px;background:#fff8e1;border:1px solid #ffe08a;
+             border-radius:4px;padding:10px 10px 10px 28px">{items}</ul>"""
+
     details = ""
     if error_tb:
         details = (
@@ -427,6 +460,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
     <tr style="background:#f0f0f0"><th align="left">Metric</th><th>Count</th></tr>
     {rows}
   </table>
+{doc_warning_block}
   {details}
   <p style="color:#888;font-size:12px;margin-top:20px">
      Automated message from the PS BidAnalyzer (DetailedAnalyzer).</p>
