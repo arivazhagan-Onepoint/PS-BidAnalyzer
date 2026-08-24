@@ -69,6 +69,55 @@ def _configure_logging():
     )
 
 
+def _documents_note(brief, mark_done: bool) -> str:
+    """The document-pack part of a row's log entry.
+
+    Any shortfall in the pack belongs on the ROW, not only in the run log and the
+    email. The row is where someone goes to find out why a brief says what it
+    says, and a pack that was only partly read changes what the brief could
+    possibly have known — an answer of "not stated in the tender" means something
+    different when a document went unread.
+
+    Reported as a caveat, never as an error: the tender was still analysed and a
+    brief still produced, so the run carries on to the next row and the email
+    stays green. What it does do is record that the status was deliberately left
+    alone, so the row is picked up again rather than looking overlooked.
+    """
+    docs = brief.documents
+    if not docs.documents:
+        return "no tender documents available — assessed on the notice alone"
+
+    parts = [f"{len(docs.used)} of {len(docs.documents)} read"]
+
+    unread = [d for d in docs.documents if d.error]
+    if unread:
+        parts.append(
+            "NOT READ: " + ", ".join(f"'{d.name}' ({d.error})" for d in unread)
+        )
+
+    superseded = [d for d in docs.documents if d.superseded_by]
+    if superseded:
+        parts.append(
+            "superseded: "
+            + ", ".join(f"'{d.name}' by '{d.superseded_by}'" for d in superseded)
+        )
+
+    truncated = [d for d in docs.used if d.truncated_from]
+    if truncated:
+        parts.append(
+            "truncated to fit the analysis budget: "
+            + ", ".join(f"'{d.name}'" for d in truncated)
+        )
+
+    if unread and not mark_done:
+        parts.append(
+            f"{STATUS_FIELD} left unchanged so this tender is re-analysed once the "
+            f"whole pack can be read"
+        )
+
+    return "; ".join(parts)
+
+
 def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> dict:
     """Assemble the field->value map to write back for one analysed tender.
 
@@ -99,6 +148,7 @@ def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> 
     entry = (
         f"[{ts}] Detailed analysis: {brief.likelihood_summary}"
         f"{' | Report: ' + report_url if report_url else ''}"
+        f" | Documents: {_documents_note(brief, mark_done)}"
         f"{f' | {STATUS_FIELD} set to {COMPLETED_STATUS}' if mark_done else ''}"
     )
 

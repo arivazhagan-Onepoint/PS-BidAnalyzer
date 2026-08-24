@@ -152,13 +152,40 @@ A tender with no folder, an empty folder, an unreadable document or a Drive outa
 degrades to the notice summary and the corpus, and the prompt is told the pack was
 unavailable so the brief says so rather than inferring an answer.
 
-**A read failure is treated as retryable, not as a fact about the document.** Such
-a run is not cached, and the row is not marked `Done`
-(`MARK_COMPLETE_REQUIRES_FULL_PACK`), so a later run redoes it against the full
-pack. Both guards come from one measured incident: a run whose `pypdf` import
-failed briefed a tender from 2 of its 4 documents, cached that as the pack's
-settled state, wrote the report and marked the row `Done` — the PDF was fine and
-the import worked minutes later, but the row was out of scope for good.
+**A document that cannot be read is a caveat, not an error.** The tender is still
+analysed, the report is still produced, and the run carries straight on to the
+next row — nothing increments the run's error count, so the summary email stays
+green. Three things happen instead:
+
+1. **The detail is written to the row.** The `Comments` and
+   `Bid Qualification Reason(System)` entries carry a `Documents:` clause naming
+   what was read, what could not be and why, what was superseded, and what was
+   truncated. `Comments` is where someone goes to find out why a brief says what
+   it says, and "not stated in the tender" means something different when a
+   document went unread:
+
+   ```
+   [2026-08-23 14:30] Detailed analysis: 70% (MEDIUM) | Report: https://… |
+   Documents: 2 of 4 read; NOT READ: 'Code.pdf' (ModuleNotFoundError: No module
+   named 'pypdf'); superseded: 'ITT.docx' by 'ITT v2.docx'; Bid Qualification
+   left unchanged so this tender is re-analysed once the whole pack can be read
+   ```
+
+2. **The status is left alone** (`MARK_COMPLETE_REQUIRES_FULL_PACK`), so the row
+   stays in `Docs(Ready)` and a later run redoes it against the full pack. Every
+   kind of read failure is treated the same way — no exception is made for a file
+   type this layer cannot handle, so such a row keeps coming back until the pack
+   is fixed or the file removed.
+
+3. **The pack is not cached.** The fingerprint covers only the files and the
+   settings, so a cached failure would be served on every later run until someone
+   happened to edit the pack in Drive.
+
+All three come from one measured incident: a run whose `pypdf` import failed
+briefed a tender from 2 of its 4 documents, cached that as the pack's settled
+state, wrote the report and marked the row `Done` — the PDF was fine and the
+import worked minutes later, but the row was out of scope for good and only the
+run log recorded the gap.
 
 Log: `DetailedAnalyzer/detailed_analyzer.log` (also echoed to console). Covered
 by the root `.gitignore`'s `*.log`.
