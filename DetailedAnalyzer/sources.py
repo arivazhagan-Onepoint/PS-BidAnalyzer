@@ -1,10 +1,16 @@
 """
 Source corpus ingestion for the detailed analysis stage.
 
-Reads Onepoint's own evidence — the capability matrix, the supplier readiness
-questionnaire, past performance — out of the Drive folder in
-``config.SOURCES_FOLDER_ID``, normalises it, and renders one markdown corpus that
-every analysis run injects into its prompt.
+Reads Onepoint's own evidence and renders the one markdown corpus that every
+analysis run injects into its prompt. Two sources, both describing the same
+company and both going stale the same way, so both are gathered by one build:
+
+  * the capability matrix, supplier readiness questionnaire and past performance,
+    out of the Drive folder in ``config.SOURCES_FOLDER_ID``;
+  * Onepoint's public website at ``config.SITE_BASE_URL``, which keeps its own
+    section and its own caveat inside the corpus — a procurement answer is
+    something Onepoint committed to, website copy is marketing, and only the
+    first can be put to a buyer as established fact.
 
 Why this exists rather than reading the NotebookLM links in Requirements.md:
 those are consumer notebooks behind a Google sign-in wall and cannot be read by
@@ -13,7 +19,8 @@ notebook is only a wrapper over source documents, so this ingests the documents.
 
 Two separable jobs, deliberately kept apart:
 
-  build_corpus()  hits Drive + Sheets, normalises, renders, writes the cache.
+  build_corpus()  hits Drive + Sheets + the website, normalises, renders, writes
+                  the cache.
                   Run on its own cadence — the corpus changes when someone edits
                   a source sheet, not when a tender arrives.
   load_corpus()   reads the cache. What an analysis run calls. No API calls, no
@@ -25,7 +32,8 @@ containing a dummy example row, a duplicated tab, unfilled money columns and ~17
 provisional cells; every filter here corresponds to something verified present in
 the data. See the ingestion filter block in config.py for what each one is for.
 
-Run:  python -m DetailedAnalyzer.sources            (build/refresh the corpus)
+Run:  python -m DetailedAnalyzer.sources            (build/refresh the corpus AND
+                                                    Onepoint's website artifact)
       python -m DetailedAnalyzer.sources --dry-run  (render to stdout, write nothing)
 """
 import argparse
@@ -35,6 +43,10 @@ import logging
 import os
 import re
 import sys
+import time
+from urllib.parse import urlparse
+
+import requests
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -63,7 +75,19 @@ from .config import (
     MONEY_ZERO_VALUES,
     DEDUPE_IDENTICAL_TABS,
     SKIP_TABS,
+    SITE_ENABLED,
+    SITE_BASE_URL,
+    SITE_SITEMAP_URL,
+    SITE_INCLUDE_EXACT,
+    SITE_EXCLUDE_PREFIXES,
+    SITE_MAX_PAGES,
+    SITE_MAX_PAGE_CHARS,
+    SITE_MIN_PAGE_CHARS,
+    SITE_REQUEST_TIMEOUT,
+    SITE_REQUEST_DELAY,
+    WEB_USER_AGENT,
 )
+from .web_text import fetch_text
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +104,7 @@ _STATS_KEYS = (
     "rows_example_dropped", "cols_pii_dropped", "rows_pii_dropped",
     "cells_pii_scrubbed", "rows_sensitive_withheld", "cells_blank_omitted",
     "cells_unconfirmed", "cells_money_zeroed",
+    "site_pages", "site_pages_used", "site_pages_failed", "site_pages_thin",
 )
 
 
@@ -276,7 +301,7 @@ def render_tab(title: str, rows: list, stats: dict) -> str:
     if not rows:
         return ""
 
-    out = [f"### {title.strip()}", ""]
+    out = [f"#### {title.strip()}", ""]
     header_idx = _find_header_row(rows)
 
     if header_idx < 0:
@@ -366,6 +391,133 @@ def render_tab(title: str, rows: list, stats: dict) -> str:
     return "\n".join(out)
 
 
+# --- Onepoint's public website ----------------------------------------------
+# The second half of the same picture. Onepoint's internal records say what it has
+# committed to in procurement documents; the website says what it tells the market.
+# Both describe one company, both go stale the same way, so both are gathered by
+# this one build and land in this one artifact.
+_LOC_RE = re.compile(r"<loc>([^<]+)</loc>")
+
+
+def _fetch(url: str) -> str:
+    response = requests.get(
+        url, headers={"User-Agent": WEB_USER_AGENT}, timeout=SITE_REQUEST_TIMEOUT
+    )
+    response.raise_for_status()
+    return response.text
+
+
+def list_site_pages() -> list:
+    """In-scope page URLs from the site's own sitemap, highest value first.
+
+    Read from the sitemap rather than crawled link by link: the sitemap is the
+    site's own statement of what it publishes, so there is no link following, no
+    depth limit and no way to wander onto another domain.
+    """
+    try:
+        index = _fetch(SITE_SITEMAP_URL)
+    except Exception as e:
+        logger.error(f"Could not read the sitemap {SITE_SITEMAP_URL}: {e}")
+        return []
+
+    locations = _LOC_RE.findall(index)
+    pages = [u for u in locations if not u.endswith(".xml")]
+    for nested in [u for u in locations if u.endswith(".xml")]:
+        try:
+            pages.extend(u for u in _LOC_RE.findall(_fetch(nested))
+                         if not u.endswith(".xml"))
+        except Exception as e:
+            logger.warning(f"  sub-sitemap {nested} could not be read: {e}")
+
+    host = urlparse(SITE_BASE_URL).netloc
+    kept, seen = [], set()
+    for url in pages:
+        parsed = urlparse(url)
+        if parsed.netloc != host:
+            continue
+        path = parsed.path or "/"
+        if any(path.startswith(p) for p in SITE_EXCLUDE_PREFIXES):
+            continue
+        key = url.rstrip("/") or url
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(url)
+
+    def rank(url):
+        """Priority tier, so the page cap trims the tail and not the good pages.
+
+        "/" is matched EXACTLY, never as a prefix — as a prefix it matches every
+        path on the site, which collapsed twenty pages into one tier and left the
+        cap dropping them alphabetically. That is the one place relevance was
+        being decided by accident rather than judgement.
+        """
+        path = urlparse(url).path or "/"
+        for i, prefix in enumerate(SITE_INCLUDE_EXACT):
+            if path == prefix or (prefix != "/" and path.startswith(prefix)):
+                return i
+        return len(SITE_INCLUDE_EXACT)
+
+    kept.sort(key=lambda u: (rank(u), u))
+    if len(kept) > SITE_MAX_PAGES:
+        dropped = kept[SITE_MAX_PAGES:]
+        logger.warning(
+            f"  {len(kept)} pages in scope, capped at SITE_MAX_PAGES="
+            f"{SITE_MAX_PAGES}; dropping {len(dropped)}: "
+            + ", ".join(urlparse(u).path for u in dropped[:8])
+            + ("…" if len(dropped) > 8 else "")
+        )
+        kept = kept[:SITE_MAX_PAGES]
+    return kept
+
+
+def render_website(stats: dict) -> list:
+    """Fetch the in-scope pages and render them as corpus sections.
+
+    Free text goes through the same ``_scrub_pii`` as every other cell in the
+    corpus: the site carries a contact page and named authors, and there is no
+    reason for the corpus to hold a personal address in one place and withhold it
+    in another.
+    """
+    pages = list_site_pages()
+    if not pages:
+        logger.warning("  no website pages in scope — corpus will hold records only")
+        return []
+
+    logger.info(f"Fetching {len(pages)} page(s) from {SITE_BASE_URL}")
+    out = [
+        f"## Onepoint public website ({SITE_BASE_URL})",
+        "",
+        "PUBLISHED MARKETING MATERIAL, not a procurement answer. Good evidence of "
+        "what Onepoint offers, which clients and sectors it names, and which "
+        "certifications and policies it publishes — but a claim here is a claim "
+        "Onepoint makes about itself. It does not verify an accreditation, a "
+        "certification or a contract, and where it disagrees with the records "
+        "above, the records win.",
+        "",
+    ]
+    for i, url in enumerate(pages, 1):
+        path = urlparse(url).path or "/"
+        stats["site_pages"] += 1
+        try:
+            text = fetch_text(url, SITE_REQUEST_TIMEOUT, SITE_MAX_PAGE_CHARS)
+        except Exception as e:
+            logger.warning(f"  [{i}/{len(pages)}] {path}: {type(e).__name__}: {e}")
+            stats["site_pages_failed"] += 1
+            continue
+        if len(text) < SITE_MIN_PAGE_CHARS:
+            logger.info(f"  [{i}/{len(pages)}] {path}: {len(text)} chars — too thin")
+            stats["site_pages_thin"] += 1
+            continue
+        text = _scrub_pii(text, stats)
+        out += [f"### {path}", f"<{url}>", "", text, ""]
+        stats["site_pages_used"] += 1
+        logger.info(f"  [{i}/{len(pages)}] {path}: {len(text):,} chars")
+        if SITE_REQUEST_DELAY and i < len(pages):
+            time.sleep(SITE_REQUEST_DELAY)
+    return out
+
+
 def build_corpus(dry_run: bool = False) -> str:
     """Ingest every source sheet and return the rendered corpus markdown.
 
@@ -385,7 +537,8 @@ def build_corpus(dry_run: bool = False) -> str:
         "# Onepoint source corpus",
         "",
         f"Ingested {datetime.now(UK_TIMEZONE).strftime('%Y-%m-%d %H:%M %Z')} from "
-        f"Drive folder `{SOURCES_FOLDER_ID}`.",
+        f"Drive folder `{SOURCES_FOLDER_ID}`"
+        + (f" and {SITE_BASE_URL}." if SITE_ENABLED else "."),
         "",
         "Personal contact details (named referees, direct phone numbers, personal "
         f"email addresses) are withheld as `{PII_REDACTION}` — they carry no "
@@ -396,9 +549,11 @@ def build_corpus(dry_run: bool = False) -> str:
         "",
     ]
 
+    if files:
+        chunks += ["## Onepoint internal records", ""]
     for f in files:
         logger.info(f"Ingesting '{f['name']}' (modified {f.get('modifiedTime')})")
-        chunks.append(f"## {f['name']}")
+        chunks.append(f"### {f['name']}")
         chunks.append("")
         for title, rows in read_spreadsheet(sheets, f["id"]):
             stats["tabs"] += 1
@@ -426,6 +581,15 @@ def build_corpus(dry_run: bool = False) -> str:
             else:
                 logger.info(f"  tab '{title}': empty after normalisation")
 
+    # The website, into the same artifact. Its failure must not lose the records
+    # this run has just gathered, so it is contained rather than allowed to raise.
+    if SITE_ENABLED:
+        logger.info("-" * 70)
+        try:
+            chunks += render_website(stats)
+        except Exception as e:
+            logger.error(f"Website ingestion failed ({e}); records are unaffected")
+
     corpus = "\n".join(chunks).rstrip() + "\n"
 
     logger.info("-" * 70)
@@ -443,6 +607,9 @@ def build_corpus(dry_run: bool = False) -> str:
     logger.info(f"  Blank cells omitted   : {stats['cells_blank_omitted']} (not rendered at all)")
     logger.info(f"  Cells unconfirmed     : {stats['cells_unconfirmed']}")
     logger.info(f"  Money zeros suppressed: {stats['cells_money_zeroed']}")
+    logger.info(f"  Website pages used    : {stats['site_pages_used']} of "
+                f"{stats['site_pages']} ({stats['site_pages_failed']} failed, "
+                f"{stats['site_pages_thin']} too thin)")
     logger.info(f"  Corpus size           : {len(corpus):,} chars")
     logger.info("-" * 70)
 

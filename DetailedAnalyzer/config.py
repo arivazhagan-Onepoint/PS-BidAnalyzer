@@ -81,6 +81,78 @@ SOURCES_FOLDER_ID = "1mcKppNQAIwxq3zArDw1VHpfMuMcHiXn4"   # "Bid Analyzer - Sour
 # git history.
 CORPUS_FILE = os.path.join(KNOWLEDGE_DIR, "onepoint_corpus.md")
 
+# --- Onepoint's public website ----------------------------------------------
+# Ingested as PART OF THE CORPUS, by the same build_corpus() run and into the same
+# artifact. The website and the internal records describe one company and go stale
+# the same way, so they are gathered together and there is one thing to refresh.
+#
+# Within the corpus it keeps its own section and its own caveat: a procurement
+# answer is something Onepoint committed to in a document, whereas website copy is
+# marketing, and the marketing register is what inflates a fit score — the
+# expensive direction to be wrong in. Labelling the section costs nothing and
+# keeps that distinction available to the model.
+#
+# The domain is onepointltd.com, NOT onepoint.com. Checked 2026-08-23: TLS on
+# www.onepoint.com does not even cover that hostname, and it is not Onepoint's —
+# ingesting it would have put another company's claims into the capability
+# evidence. onepointltd.com serves "Onepoint | Your trusted companions for the
+# digital journey", matching the onepointltd.com addresses already in this config.
+SITE_ENABLED      = True
+SITE_BASE_URL     = "https://www.onepointltd.com"
+SITE_SITEMAP_URL  = "https://www.onepointltd.com/sitemap_index.xml"
+
+# Priority order. Pages matching an earlier prefix are fetched first, so
+# SITE_MAX_PAGES trims the tail rather than dropping the certifications page on
+# alphabetical luck.
+SITE_INCLUDE_EXACT = (
+    "/core-capabilities",   # the capability statement itself
+    "/certifications",      # ISO/Cyber Essentials — Section 4B asks this directly
+    "/client-stories",      # named past performance, the strongest public evidence
+    "/policies",            # modern slavery, environmental — public buyers ask
+    "/discover-onepoint",
+    "/tech-",               # /tech-architecture/, /tech-build/ — capability pages
+    "/smart-",              # the Smart* product family
+    "/rapid-value-method",  # the delivery method the brief cites by name
+    "/",                    # home — matched EXACTLY, never as a prefix
+)
+
+# Excluded outright: 40 of the site's 105 pages are thought-leadership and press
+# releases. They evidence nothing a buyer would accept, and "award-winning",
+# "enterprise-grade" and "global clients" repeated forty times reads to a model as
+# corroboration rather than as one claim restated.
+SITE_EXCLUDE_PREFIXES = (
+    "/insights", "/news", "/author", "/category", "/tag",
+    "/gift-for-you", "/wp-content", "/wp-json",
+    # Website governance rather than corporate policy. Measured 2026-08-25: these
+    # five came to 26k chars — a fifth of the whole artifact — of cookie
+    # explanations, IP notices and site terms. No buyer assesses a supplier on its
+    # copyright notice, and the tokens are better spent elsewhere. The policies a
+    # public buyer DOES ask about (anti-bribery, modern slavery, carbon reduction,
+    # environmental, EDI, quality) are kept.
+    "/policies/cookie-policy",
+    "/policies/copyright-policy",
+    "/policies/disclaimer",
+    "/policies/privacy-notice",
+    "/policies/terms-of-website-use",
+)
+
+# A safety net against a site that suddenly grows, NOT an active trimmer: the
+# exclusions above do the filtering, and 57 pages are in scope. At 40 the cap was
+# dropping 17 on alphabetical order within the lowest tier, including
+# /tech-architecture/ and /tech-build/ — capability evidence lost to nothing more
+# than the letter T. Raise this if the site outgrows it; do not use it to trim.
+SITE_MAX_PAGES       = 80
+SITE_MAX_PAGE_CHARS  = 8_000    # per page; the home page is the only one near this
+SITE_MIN_PAGE_CHARS  = 200      # below this it is a landing shell, not content
+SITE_REQUEST_TIMEOUT = 25
+SITE_REQUEST_DELAY   = 0.5      # courtesy gap between requests
+
+# Sent when fetching a web page, so the traffic is identifiable in a server log
+# rather than looking like an anonymous scraper.
+WEB_USER_AGENT = (
+    "Mozilla/5.0 (compatible; PS-BidAnalyzer/1.0; +https://www.onepointltd.com)"
+)
+
 # --- Ingestion filters ------------------------------------------------------
 # Everything below exists because the source sheets are hand-maintained working
 # documents, not a clean dataset. Each filter corresponds to something verified

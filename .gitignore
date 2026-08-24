@@ -11,10 +11,12 @@ adapters/**/target_json/
 analyzer/knowledge/nobid_patterns.md
 analyzer/knowledge/bid_patterns.md
 
-# Ingested source corpus — rebuilt by DetailedAnalyzer.sources from Drive.
+# Ingested source corpus — rebuilt by DetailedAnalyzer.sources from Drive and
+# from onepointltd.com.
 # Never commit: unreleased commercial evidence (client names, contract detail,
 # compliance answers) even after PII stripping.
 DetailedAnalyzer/knowledge/onepoint_corpus.md
+
 
 # Extracted tender packs, cached per OCID by DetailedAnalyzer.tender_docs.
 # Never commit: these are the buyers' own documents, routinely covered by the
