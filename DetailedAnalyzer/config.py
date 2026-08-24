@@ -101,34 +101,41 @@ SITE_ENABLED      = True
 SITE_BASE_URL     = "https://www.onepointltd.com"
 SITE_SITEMAP_URL  = "https://www.onepointltd.com/sitemap_index.xml"
 
-# Priority order. Pages matching an earlier prefix are fetched first, so
-# SITE_MAX_PAGES trims the tail rather than dropping the certifications page on
-# alphabetical luck.
-SITE_INCLUDE_EXACT = (
+# BOTH the allowlist and the priority order: a page is ingested only if its path
+# matches one of these, and earlier entries are fetched first so SITE_MAX_PAGES
+# trims the tail rather than dropping the certifications page on alphabetical luck.
+#
+# An allowlist rather than a growing list of exclusions, because the default has to
+# be right. Measured 2026-08-25: the 24 product pages were 90,684 chars — half the
+# website content — and tracing the brief's phrases back to source showed they were
+# restating what the hand-authored capability context already said (Woven,
+# Differential, Rapid Value Method, Living Wage all appear in it), while the score
+# came out at 75% MEDIUM either way. With an exclude list, next month's product
+# page would quietly reintroduce that bulk; with an allowlist a new client story or
+# policy is picked up automatically and a new product page is not.
+SITE_INCLUDE_PREFIXES = (
     "/core-capabilities",   # the capability statement itself
     "/certifications",      # ISO/Cyber Essentials — Section 4B asks this directly
     "/client-stories",      # named past performance, the strongest public evidence
-    "/policies",            # modern slavery, environmental — public buyers ask
+    "/policies",            # modern slavery, carbon, EDI — public buyers ask
+    "/tech-",               # /tech-architecture/, /tech-build/ … the delivery stack
+    "/rapid-value-method",  # delivery methods the brief cites by name
+    "/valuepath",
     "/discover-onepoint",
-    "/tech-",               # /tech-architecture/, /tech-build/ — capability pages
-    "/smart-",              # the Smart* product family
-    "/rapid-value-method",  # the delivery method the brief cites by name
     "/",                    # home — matched EXACTLY, never as a prefix
 )
 
-# Excluded outright: 40 of the site's 105 pages are thought-leadership and press
-# releases. They evidence nothing a buyer would accept, and "award-winning",
-# "enterprise-grade" and "global clients" repeated forty times reads to a model as
-# corroboration rather than as one claim restated.
+# Applied AFTER the allowlist, so it only ever carves out sub-paths of a section
+# that is otherwise wanted. Everything else — /insights/, /news/, the product
+# pages — is already absent by not being on the allowlist, and listing it here too
+# would be config that looks load-bearing but is not.
+#
+# These five are website governance dressed as policy. Measured 2026-08-25: 26k
+# chars of cookie explanations, IP notices and site terms. No buyer assesses a
+# supplier on its copyright notice, whereas the policies alongside them
+# (anti-bribery, modern slavery, carbon reduction, environmental, EDI, quality) are
+# exactly what a public buyer asks for.
 SITE_EXCLUDE_PREFIXES = (
-    "/insights", "/news", "/author", "/category", "/tag",
-    "/gift-for-you", "/wp-content", "/wp-json",
-    # Website governance rather than corporate policy. Measured 2026-08-25: these
-    # five came to 26k chars — a fifth of the whole artifact — of cookie
-    # explanations, IP notices and site terms. No buyer assesses a supplier on its
-    # copyright notice, and the tokens are better spent elsewhere. The policies a
-    # public buyer DOES ask about (anti-bribery, modern slavery, carbon reduction,
-    # environmental, EDI, quality) are kept.
     "/policies/cookie-policy",
     "/policies/copyright-policy",
     "/policies/disclaimer",
@@ -137,10 +144,10 @@ SITE_EXCLUDE_PREFIXES = (
 )
 
 # A safety net against a site that suddenly grows, NOT an active trimmer: the
-# exclusions above do the filtering, and 57 pages are in scope. At 40 the cap was
-# dropping 17 on alphabetical order within the lowest tier, including
-# /tech-architecture/ and /tech-build/ — capability evidence lost to nothing more
-# than the letter T. Raise this if the site outgrows it; do not use it to trim.
+# allowlist above does the filtering. At 40 the cap was dropping 17 pages on
+# alphabetical order within the lowest tier, including /tech-architecture/ and
+# /tech-build/ — capability evidence lost to nothing more than the letter T. Raise
+# this if the site outgrows it; do not use it to trim.
 SITE_MAX_PAGES       = 80
 SITE_MAX_PAGE_CHARS  = 8_000    # per page; the home page is the only one near this
 SITE_MIN_PAGE_CHARS  = 200      # below this it is a landing shell, not content

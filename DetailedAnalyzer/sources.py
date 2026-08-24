@@ -78,7 +78,7 @@ from .config import (
     SITE_ENABLED,
     SITE_BASE_URL,
     SITE_SITEMAP_URL,
-    SITE_INCLUDE_EXACT,
+    SITE_INCLUDE_PREFIXES,
     SITE_EXCLUDE_PREFIXES,
     SITE_MAX_PAGES,
     SITE_MAX_PAGE_CHARS,
@@ -429,6 +429,20 @@ def list_site_pages() -> list:
         except Exception as e:
             logger.warning(f"  sub-sitemap {nested} could not be read: {e}")
 
+    def rank(url):
+        """Priority tier of a page, or None when it is not on the allowlist.
+
+        "/" is matched EXACTLY, never as a prefix — as a prefix it matches every
+        path on the site, which collapsed twenty pages into one tier and left the
+        page cap dropping them alphabetically. That was the one place relevance
+        was decided by accident rather than by judgement.
+        """
+        path = urlparse(url).path or "/"
+        for i, prefix in enumerate(SITE_INCLUDE_PREFIXES):
+            if path == prefix or (prefix != "/" and path.startswith(prefix)):
+                return i
+        return None
+
     host = urlparse(SITE_BASE_URL).netloc
     kept, seen = [], set()
     for url in pages:
@@ -436,29 +450,18 @@ def list_site_pages() -> list:
         if parsed.netloc != host:
             continue
         path = parsed.path or "/"
+        if rank(url) is None:
+            continue        # not on the allowlist
         if any(path.startswith(p) for p in SITE_EXCLUDE_PREFIXES):
-            continue
+            continue        # carved out of a section that is otherwise wanted
         key = url.rstrip("/") or url
         if key in seen:
             continue
         seen.add(key)
         kept.append(url)
 
-    def rank(url):
-        """Priority tier, so the page cap trims the tail and not the good pages.
-
-        "/" is matched EXACTLY, never as a prefix — as a prefix it matches every
-        path on the site, which collapsed twenty pages into one tier and left the
-        cap dropping them alphabetically. That is the one place relevance was
-        being decided by accident rather than judgement.
-        """
-        path = urlparse(url).path or "/"
-        for i, prefix in enumerate(SITE_INCLUDE_EXACT):
-            if path == prefix or (prefix != "/" and path.startswith(prefix)):
-                return i
-        return len(SITE_INCLUDE_EXACT)
-
     kept.sort(key=lambda u: (rank(u), u))
+    logger.info(f"  {len(kept)} page(s) on the allowlist, of {len(set(pages))} published")
     if len(kept) > SITE_MAX_PAGES:
         dropped = kept[SITE_MAX_PAGES:]
         logger.warning(
