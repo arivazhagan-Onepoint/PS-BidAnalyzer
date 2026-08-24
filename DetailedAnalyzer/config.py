@@ -219,10 +219,16 @@ TENDER_DOCS_CACHE_DIR = os.path.join(KNOWLEDGE_DIR, "tender_docs")
 # tender's own folder where the service account CANNOT remove it (it holds
 # canEdit but not canDelete/canTrash on that shared drive). Those leftovers would
 # then be re-ingested as tender documents on the next run.
-DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-PDF_MIME  = "application/pdf"
-GDOC_MIME = "application/vnd.google-apps.document"
-TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, PDF_MIME, GDOC_MIME)
+DOCX_MIME   = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+PDF_MIME    = "application/pdf"
+GDOC_MIME   = "application/vnd.google-apps.document"
+# Spreadsheets are not optional: a pack ships its pricing schedule and its
+# requirements matrix as one, so the most structured document in the pack would
+# otherwise be the only one unreadable — and an unreadable document holds its row
+# in scope on every run (see TENDER_DOCS_MAX_ATTEMPTS).
+XLSX_MIME   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+GSHEET_MIME = "application/vnd.google-apps.spreadsheet"
+TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, PDF_MIME, GDOC_MIME, XLSX_MIME, GSHEET_MIME)
 
 # Total characters of pack text allowed into one prompt, across all documents.
 #
@@ -369,6 +375,21 @@ MARK_COMPLETE_REQUIRES_REPORT = True
 # scope for good and only the manifest recorded the gap. A read failure is almost
 # never a property of the document, so it is worth one retry.
 MARK_COMPLETE_REQUIRES_FULL_PACK = True
+
+# Backstop on the guard above. A file this layer genuinely cannot read — a format
+# outside TENDER_DOCS_SUPPORTED_MIMES, or a scanned PDF with no text layer — fails
+# identically every run, so holding the status forever means re-analysing that
+# tender and depositing ANOTHER timestamped report on every run, none of which the
+# service account can delete (it holds canAddChildren but not canDelete on the
+# reports drive). The folder already carries four reports for one tender from the
+# era before anything moved a row out of scope.
+#
+# After this many attempts the row is marked COMPLETED_STATUS anyway, and the
+# Comments entry says plainly that it completed on an incomplete pack and what to
+# do about it. Attempts are counted from the "incomplete pack, attempt N" marker
+# in the system reason column, so no extra tracker column is needed. Set to 0 for
+# unlimited retries.
+TENDER_DOCS_MAX_ATTEMPTS = 3
 
 # Optional belt-and-braces: a column that, when non-empty, takes a row out of
 # scope regardless of status. Not needed now that COMPLETED_STATUS moves the row

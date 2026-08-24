@@ -64,12 +64,19 @@ from .config import (
     DOCX_MIME,
     PDF_MIME,
     GDOC_MIME,
+    XLSX_MIME,
+    GSHEET_MIME,
 )
 
 logger = logging.getLogger(__name__)
 
 # Word namespace in a .docx's document.xml.
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+
+# SpreadsheetML namespaces, for .xlsx. Same trick as .docx — the file is a zip of
+# XML, so the standard library is enough and no dependency is added.
+_XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_XL_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 
 _VERSION_RES = tuple(re.compile(p, re.IGNORECASE) for p in TENDER_DOCS_VERSION_PATTERNS)
 
@@ -153,6 +160,18 @@ def _drive_service():
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
         _drive = build("drive", "v3", credentials=creds)
     return _drive
+
+
+_sheets = None
+
+
+def _sheets_service():
+    """Only built when a pack actually contains a native Google Sheet."""
+    global _sheets
+    if _sheets is None:
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+        _sheets = build("sheets", "v4", credentials=creds)
+    return _sheets
 
 
 def find_tender_folder(ocid: str) -> dict:
@@ -262,6 +281,148 @@ def _pdf_text(data: bytes) -> str:
     return "\n".join(p for p in pages if p)
 
 
+def _col_index(ref: str) -> int:
+    """0-based column from a cell reference: A1 -> 0, B12 -> 1, AA3 -> 26."""
+    letters = "".join(ch for ch in (ref or "") if ch.isalpha()).upper()
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return max(0, n - 1)
+
+
+def _xlsx_shared_strings(z) -> list:
+    """The workbook's string table. Cells reference it by index, not by value."""
+    if "xl/sharedStrings.xml" not in z.namelist():
+        return []
+    root = ET.fromstring(z.read("xl/sharedStrings.xml"))
+    return [
+        "".join(t.text or "" for t in si.iter(f"{_XL}t"))
+        for si in root.iter(f"{_XL}si")
+    ]
+
+
+def _xlsx_sheets(z) -> list:
+    """[(sheet title, part path)] in the workbook's own tab order.
+
+    Resolved through the relationship table rather than assuming
+    ``xl/worksheets/sheet1.xml``: part names need not match tab order, and a
+    workbook whose first tab is sheet3.xml is perfectly legal.
+    """
+    names = z.namelist()
+    if "xl/workbook.xml" not in names:
+        return []
+    rels = {}
+    if "xl/_rels/workbook.xml.rels" in names:
+        for rel in ET.fromstring(z.read("xl/_rels/workbook.xml.rels")):
+            rels[rel.get("Id")] = rel.get("Target") or ""
+    out = []
+    for sheet in ET.fromstring(z.read("xl/workbook.xml")).iter(f"{_XL}sheet"):
+        target = rels.get(sheet.get(f"{_XL_REL}id"), "")
+        target = target[1:] if target.startswith("/") else target
+        if target and not target.startswith("xl/"):
+            target = "xl/" + target
+        if target in names:
+            out.append((sheet.get("name") or "Sheet", target))
+    return out
+
+
+def _xlsx_rows(z, path: str, shared: list) -> list:
+    """Rows of one worksheet, each a list of cell strings with gaps preserved.
+
+    Blank columns are kept as empty strings rather than collapsed, so a value
+    stays under the header it belongs to — a pricing schedule read with its
+    columns shifted is worse than not reading it at all.
+    """
+    rows = []
+    for row in ET.fromstring(z.read(path)).iter(f"{_XL}row"):
+        cells = {}
+        for cell in row.iter(f"{_XL}c"):
+            kind = cell.get("t")
+            value = cell.find(f"{_XL}v")
+            if kind == "s" and value is not None:
+                try:
+                    text = shared[int(value.text)]
+                except (TypeError, ValueError, IndexError):
+                    text = ""
+            elif kind == "inlineStr":
+                inline = cell.find(f"{_XL}is")
+                text = ("".join(t.text or "" for t in inline.iter(f"{_XL}t"))
+                        if inline is not None else "")
+            else:
+                # Numbers come through as written. A date is a serial number here
+                # and is left as one: guessing at the workbook's date system could
+                # put a wrong date into a brief, and every date that matters is
+                # already taken from the tracker and the computed timeline.
+                text = value.text if value is not None and value.text else ""
+            text = " ".join((text or "").split())
+            if text:
+                cells[_col_index(cell.get("r"))] = text
+        if cells:
+            rows.append([cells.get(i, "") for i in range(max(cells) + 1)])
+    return rows
+
+
+def _render_sheet(title: str, rows: list) -> list:
+    """One sheet as pipe-separated rows, gaps kept so columns stay aligned."""
+    if not rows:
+        return []
+    out = ["--- SHEET: " + title + " ---"]
+    for row in rows:
+        filled = [c for c in row if c]
+        # A row with a single value is a heading or a stray note rather than a
+        # table row, so it is emitted on its own. Otherwise one value sitting out
+        # in column AA renders as twenty-six empty separators — unreadable, and
+        # paid for in tokens.
+        out.append(filled[0] if len(filled) == 1
+                   else " | ".join(row).rstrip(" |"))
+    out.append("")
+    return out
+
+
+def _xlsx_text(data: bytes) -> str:
+    """Every sheet of an .xlsx as pipe-separated rows. Standard library only.
+
+    Tender packs ship their pricing schedule and requirements matrix as a
+    spreadsheet, so without this the most structured document in the pack was the
+    one thing that could not be read — and, being unreadable, it held its row in
+    scope on every run.
+    """
+    out = []
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        shared = _xlsx_shared_strings(z)
+        for title, path in _xlsx_sheets(z):
+            out += _render_sheet(title, _xlsx_rows(z, path, shared))
+    return "\n".join(out).strip()
+
+
+def _gsheet_text(file_id: str) -> str:
+    """Every tab of a native Google Sheet, read through the Sheets API.
+
+    Converting a pack's .xlsx to a Google Sheet is a helpful act, and it should
+    not turn a readable document into an unsupported one.
+    """
+    service = _sheets_service()
+    meta = service.spreadsheets().get(
+        spreadsheetId=file_id, fields="sheets.properties.title"
+    ).execute()
+    titles = [s["properties"]["title"] for s in meta.get("sheets", [])]
+    if not titles:
+        return ""
+    batch = service.spreadsheets().values().batchGet(
+        spreadsheetId=file_id,
+        ranges=["'" + t + "'" for t in titles],
+        majorDimension="ROWS",
+    ).execute()
+    out = []
+    for title, value_range in zip(titles, batch.get("valueRanges", [])):
+        rows = [
+            [" ".join((c or "").split()) for c in row]
+            for row in value_range.get("values", [])
+        ]
+        out += _render_sheet(title, [r for r in rows if any(r)])
+    return "\n".join(out).strip()
+
+
 def extract_text(file_meta: dict) -> str:
     """Text of one Drive file, by mime type. Raises on an unreadable document."""
     mime, file_id = file_meta["mimeType"], file_meta["id"]
@@ -271,6 +432,10 @@ def extract_text(file_meta: dict) -> str:
         return _pdf_text(_download(file_id))
     if mime == GDOC_MIME:
         return _export_gdoc(file_id).decode("utf-8", errors="replace")
+    if mime == XLSX_MIME:
+        return _xlsx_text(_download(file_id))
+    if mime == GSHEET_MIME:
+        return _gsheet_text(file_id)
     raise ValueError(f"unsupported type {mime}")
 
 

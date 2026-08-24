@@ -128,7 +128,7 @@ Three decisions here are behaviour, each measured on the real CITB pack
 
 | Decision | Why |
 |---|---|
-| Text comes from the **downloaded bytes** (`.docx` via stdlib `zipfile`+XML, `.pdf` via `pypdf`), never by converting a copy in Drive | Conversion works but takes ~29s/file against ~3s, and the copy lands in the customer's own folder where the service account holds `canEdit` but **not** `canDelete`/`canTrash`. The strays would then be re-ingested as tender documents on the next run |
+| Text comes from the **downloaded bytes** (`.docx` and `.xlsx` via stdlib `zipfile`+XML, `.pdf` via `pypdf`; native Google Docs and Sheets via their own APIs), never by converting a copy in Drive | Conversion works but takes ~29s/file against ~3s, and the copy lands in the customer's own folder where the service account holds `canEdit` but **not** `canDelete`/`canTrash`. The strays would then be re-ingested as tender documents on the next run |
 | Superseded versions detected by **word 5-gram Jaccard ≥ 0.90**, not `difflib` | Measured: same document 0.9896, unrelated documents 0.0001–0.0011 — a ~900× margin, in 6ms. `difflib.ratio()` separates correctly but costs ~7 minutes across the pack; its cheap `quick_ratio()` scores two unrelated documents at 0.90 |
 | Which copy wins is the **filename version marker**, never a timestamp | Both timestamps are unusable here: `modifiedTime` is *identical* for the two ITTs, and `createdTime` has v2 created 1.5s **before** v1 — "newest wins" would confidently keep the stale document |
 
@@ -172,14 +172,27 @@ green. Three things happen instead:
    ```
 
 2. **The status is left alone** (`MARK_COMPLETE_REQUIRES_FULL_PACK`), so the row
-   stays in `Docs(Ready)` and a later run redoes it against the full pack. Every
-   kind of read failure is treated the same way — no exception is made for a file
-   type this layer cannot handle, so such a row keeps coming back until the pack
-   is fixed or the file removed.
+   stays in `Docs(Ready)` and a later run redoes it against the full pack — but
+   only up to `TENDER_DOCS_MAX_ATTEMPTS` (3). Every kind of read failure is
+   treated the same way; no exception is made for a format this layer cannot
+   handle, so the cap is what stops such a row returning forever. Attempts are
+   counted from the `incomplete pack, attempt N` marker the entry itself leaves in
+   `Bid Qualification Reason(System)`, so no extra tracker column is needed. On
+   the last attempt the row is marked `Done` anyway and the entry says so, naming
+   the documents and how to undo it.
 
 3. **The pack is not cached.** The fingerprint covers only the files and the
    settings, so a cached failure would be served on every later run until someone
    happened to edit the pack in Drive.
+
+Why the cap exists: a format outside `TENDER_DOCS_SUPPORTED_MIMES` fails
+identically every run, and each run costs a fresh Gemini call plus **another
+timestamped report** in a Drive folder the service account can add to but not
+delete from (`canAddChildren: True`, `canDelete: False`). `AnalysisReports`
+already holds four reports for one tender, from the era before anything moved a
+row out of scope — the shape `c924792` fixed. Supporting `.xlsx` removes the
+realistic cause (packs ship their pricing schedule and requirements matrix as a
+spreadsheet); the cap is the backstop for everything else.
 
 All three come from one measured incident: a run whose `pypdf` import failed
 briefed a tender from 2 of its 4 documents, cached that as the pack's settled

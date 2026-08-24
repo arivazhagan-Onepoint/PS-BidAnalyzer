@@ -16,6 +16,7 @@ Run with:  python -m DetailedAnalyzer.main             (all in-scope rows)
 """
 import argparse
 import logging
+import re
 import sys
 import traceback
 from datetime import datetime
@@ -35,6 +36,7 @@ from .config import (
     MARK_COMPLETE,
     MARK_COMPLETE_REQUIRES_REPORT,
     MARK_COMPLETE_REQUIRES_FULL_PACK,
+    TENDER_DOCS_MAX_ATTEMPTS,
     SYSTEM_REASON_FIELD,
     LINK_FIELDS,
     REPORTS_ENABLED,
@@ -69,7 +71,25 @@ def _configure_logging():
     )
 
 
-def _documents_note(brief, mark_done: bool) -> str:
+# The marker the attempt counter reads back. Written into the system reason column
+# by _documents_note, so the count lives in a column the row already has rather
+# than needing a new one added to the tracker by hand.
+_ATTEMPT_RE = re.compile(r"incomplete pack, attempt (\d+)")
+
+
+def _pack_attempt(tender) -> int:
+    """Which attempt at this tender's pack this run is — 1 for the first.
+
+    Counted from the markers previous runs left in the system reason column. That
+    column is prepended to and never rewritten, so the history is already there;
+    reading it back is what lets the retry cap work without a new tracker column.
+    """
+    prior = tender.data.get(SYSTEM_REASON_FIELD, "") or ""
+    seen = [int(n) for n in _ATTEMPT_RE.findall(prior)]
+    return max(seen) + 1 if seen else 1
+
+
+def _documents_note(brief, mark_done: bool, attempt: int = 1) -> str:
     """The document-pack part of a row's log entry.
 
     Any shortfall in the pack belongs on the ROW, not only in the run log and the
@@ -109,16 +129,30 @@ def _documents_note(brief, mark_done: bool) -> str:
             + ", ".join(f"'{d.name}'" for d in truncated)
         )
 
-    if unread and not mark_done:
-        parts.append(
-            f"{STATUS_FIELD} left unchanged so this tender is re-analysed once the "
-            f"whole pack can be read"
-        )
+    if unread:
+        limit = f" of {TENDER_DOCS_MAX_ATTEMPTS}" if TENDER_DOCS_MAX_ATTEMPTS else ""
+        parts.append(f"incomplete pack, attempt {attempt}{limit}")
+        if mark_done:
+            # The cap was reached. Say what was given up and how to undo it, since
+            # the row is about to leave scope with evidence still missing.
+            parts.append(
+                f"attempt limit reached — {STATUS_FIELD} set to {COMPLETED_STATUS} "
+                f"despite the incomplete pack, to stop this tender being "
+                f"re-analysed and re-reported on every run. Fix or remove the "
+                f"document(s) above, then set {STATUS_FIELD} back to a scoped "
+                f"status to analyse it on the full pack"
+            )
+        else:
+            parts.append(
+                f"{STATUS_FIELD} left unchanged so this tender is re-analysed once "
+                f"the whole pack can be read"
+            )
 
     return "; ".join(parts)
 
 
-def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> dict:
+def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False,
+                      attempt: int = 1) -> dict:
     """Assemble the field->value map to write back for one analysed tender.
 
     Output goes to whatever columns OUTPUT_FIELD_MAP names (keys are TenderBrief
@@ -148,7 +182,7 @@ def _build_row_update(tender, brief, run_dt, report_url="", mark_done=False) -> 
     entry = (
         f"[{ts}] Detailed analysis: {brief.likelihood_summary}"
         f"{' | Report: ' + report_url if report_url else ''}"
-        f" | Documents: {_documents_note(brief, mark_done)}"
+        f" | Documents: {_documents_note(brief, mark_done, attempt)}"
         f"{f' | {STATUS_FIELD} set to {COMPLETED_STATUS}' if mark_done else ''}"
     )
 
@@ -201,7 +235,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                "written": 0, "reports": 0, "report_errors": 0,
                "Bid": 0, "TBD": 0, "NoBid": 0, "marked_done": 0, "report_refs": [],
                "with_docs": 0, "without_docs": 0, "docs_read": 0,
-               "doc_warnings": [],
+               "doc_warnings": [], "pack_capped": 0,
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -318,20 +352,36 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         # having, and the manifest names the gap — but the row stays in scope so a
         # later run can redo it against the full evidence base.
         unread = [d for d in brief.documents.documents if d.error]
+        attempt = _pack_attempt(tender) if unread else 1
         if mark_done and MARK_COMPLETE_REQUIRES_FULL_PACK and unread:
-            mark_done = False
-            logger.warning(
-                f"Row {tender.row}: not marking {COMPLETED_STATUS} — "
-                f"{len(unread)} pack document(s) could not be read "
-                f"({', '.join(d.name for d in unread[:3])}), so the brief is based "
-                f"on an incomplete evidence base and the row stays in scope"
-            )
+            # Held back so the tender is retried on the full pack — but not
+            # forever. A document this layer cannot read fails identically every
+            # run, and each run costs another Gemini call and another report in a
+            # Drive folder the service account cannot delete from.
+            if TENDER_DOCS_MAX_ATTEMPTS and attempt >= TENDER_DOCS_MAX_ATTEMPTS:
+                summary["pack_capped"] += 1
+                logger.warning(
+                    f"Row {tender.row}: marking {COMPLETED_STATUS} anyway — attempt "
+                    f"{attempt} of {TENDER_DOCS_MAX_ATTEMPTS} and "
+                    f"{len(unread)} document(s) still unreadable "
+                    f"({', '.join(d.name for d in unread[:3])}). Fix or remove them "
+                    f"and re-scope the row to analyse it on the full pack"
+                )
+            else:
+                mark_done = False
+                logger.warning(
+                    f"Row {tender.row}: not marking {COMPLETED_STATUS} — "
+                    f"{len(unread)} pack document(s) could not be read "
+                    f"({', '.join(d.name for d in unread[:3])}); attempt {attempt}"
+                    f"{f' of {TENDER_DOCS_MAX_ATTEMPTS}' if TENDER_DOCS_MAX_ATTEMPTS else ''}"
+                    f", so the row stays in scope"
+                )
         if mark_done:
             summary["marked_done"] += 1
 
         updates.append((
             tender.row,
-            _build_row_update(tender, brief, run_dt, report_url, mark_done),
+            _build_row_update(tender, brief, run_dt, report_url, mark_done, attempt),
         ))
 
     if updates and WRITE_BACK_ENABLED and not dry_run:
@@ -359,6 +409,12 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                 f"({summary['docs_read']} document(s) read)")
     logger.info(f"  Without pack  : {summary['without_docs']} "
                 f"(assessed on the tender summary alone)")
+    if summary["pack_capped"]:
+        logger.warning(
+            f"  Pack capped   : {summary['pack_capped']} "
+            f"(marked {COMPLETED_STATUS} after {TENDER_DOCS_MAX_ATTEMPTS} attempts "
+            f"with documents still unreadable — see Comments on those rows)"
+        )
     logger.info(f"  Reports built : {summary['reports']}"
                 f"{'' if summary['reports_enabled'] else ' (reports disabled)'}")
     logger.info(f"  Report errors : {summary['report_errors']}")
@@ -439,6 +495,8 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         ("Analysed with the tender pack", s.get("with_docs", 0)),
         ("Analysed on the notice alone (no pack uploaded)", s.get("without_docs", 0)),
         ("Tender documents read", s.get("docs_read", 0)),
+        (f"Completed on an incomplete pack (after "
+         f"{TENDER_DOCS_MAX_ATTEMPTS} attempts)", s.get("pack_capped", 0)),
         ("Reports built", s.get("reports", 0)),
         ("Report errors", s.get("report_errors", 0)),
         (f"Marked {COMPLETED_STATUS} (now out of scope)", s.get("marked_done", 0)),
