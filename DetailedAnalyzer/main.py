@@ -237,6 +237,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                "Bid": 0, "TBD": 0, "NoBid": 0, "marked_done": 0, "report_refs": [],
                "with_docs": 0, "without_docs": 0, "docs_read": 0,
                "doc_warnings": [], "pack_capped": 0, "status_warnings": [],
+               "write_errors": 0,
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -404,7 +405,26 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         ))
 
     if updates and WRITE_BACK_ENABLED and not dry_run:
-        summary["written"] = client.write_updates(updates, link_fields=LINK_FIELDS)
+        # Contained rather than fatal. By this point every tender has been analysed
+        # and its report written to Drive, so letting a write error end the run
+        # throws away work that cannot be cheaply redone — and because the status
+        # never moves, the next run re-analyses those rows and deposits another
+        # report each. The run reports the failure and exits cleanly; the rows stay
+        # in scope, which is the correct outcome, but a visible one.
+        try:
+            summary["written"] = client.write_updates(updates, link_fields=LINK_FIELDS)
+        except Exception as e:
+            rows = [r for r, _ in updates]
+            msg = (
+                f"Write-back failed for {len(updates)} row(s) {rows}: {e}. Their "
+                f"reports exist in Drive, but the tracker was not updated and the "
+                f"rows keep their current status, so the next run will analyse them "
+                f"again and produce another report each."
+            )
+            logger.error(msg)
+            summary["write_errors"] = len(updates)
+            summary["status_warnings"].append(msg)
+            summary["marked_done"] = 0
     elif updates:
         logger.info(
             f"Write-back disabled: {len(updates)} row(s) would have been updated "
@@ -441,6 +461,9 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
     logger.info(f"  Errors        : {summary['errors']}")
     logger.info(f"  Rows written  : {summary['written']}"
                 f"{'' if summary['write_back_enabled'] else ' (write-back disabled)'}")
+    if summary["write_errors"]:
+        logger.error(f"  Write failures: {summary['write_errors']} "
+                     f"(reports exist; tracker not updated — see above)")
     logger.info(f"  Marked {COMPLETED_STATUS:<11}: {summary['marked_done']}"
                 f" (out of scope for future runs)")
     logger.info("=" * 80)
@@ -491,8 +514,9 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
     if error_tb:
         subject = f"❌ PS DetailedAnalyzer [{environment}] — {run_date} — FAILURE (run aborted)"
         banner_bg = "#c0392b"
-    elif s.get("errors", 0) or s.get("report_errors", 0):
-        n = s.get("errors", 0) + s.get("report_errors", 0)
+    elif s.get("errors", 0) or s.get("report_errors", 0) or s.get("write_errors", 0):
+        n = (s.get("errors", 0) + s.get("report_errors", 0)
+             + s.get("write_errors", 0))
         subject = (
             f"⚠️ PS DetailedAnalyzer [{environment}] — {run_date} — "
             f"COMPLETED WITH ERRORS ({n} error(s))"
@@ -522,6 +546,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         ("Skipped (no title / description)", s.get("skipped", 0)),
         ("Errors", s.get("errors", 0)),
         ("Rows written", s.get("written", 0)),
+        ("Rows that could not be written", s.get("write_errors", 0)),
     ]
     rows = "".join(
         f"<tr><td>{label}</td><td style='text-align:right'>{value}</td></tr>"

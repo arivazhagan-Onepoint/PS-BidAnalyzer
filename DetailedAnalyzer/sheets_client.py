@@ -35,7 +35,20 @@ from .config import (
 
 logger = logging.getLogger(__name__)
 
+# Retried with backoff, for two different reasons.
+#
+# 429/403 are rate limits: the request was fine, there were just too many.
+#
+# 5xx are Google-side transients, added 2026-08-26 after a batchUpdate returned
+# HTTP 500 "Internal error encountered" and aborted a whole run — the tender had
+# already been analysed and its report already created in Drive, and the abort
+# threw away only the write-back, leaving the row in scope to be analysed and
+# re-reported next time. A 500 says nothing about the request that provoked it, so
+# retrying is the only sensible response; not retrying turned a blip into lost
+# work and a duplicate report.
 RATE_LIMIT_STATUS_CODES = (429, 403)
+TRANSIENT_STATUS_CODES = (500, 502, 503, 504)
+RETRYABLE_STATUS_CODES = RATE_LIMIT_STATUS_CODES + TRANSIENT_STATUS_CODES
 
 # Sheet layout: row 1 = user summary, row 2 = headers, row 3+ = tender data.
 HEADER_ROW = 2
@@ -122,15 +135,18 @@ class SheetsClient:
 
     # --- low level -----------------------------------------------------------
     def _execute_with_retry(self, request_fn, max_retries=6):
-        """Execute a Sheets/Drive API call, retrying rate-limit errors with backoff."""
+        """Execute a Sheets/Drive API call, retrying rate limits and 5xx with backoff."""
         for attempt in range(max_retries):
             try:
                 return request_fn()
             except HttpError as e:
-                if e.resp.status in RATE_LIMIT_STATUS_CODES and attempt < max_retries - 1:
+                status = e.resp.status
+                if status in RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
                     wait = min(120, (2 ** attempt) * 5 + random.uniform(0, 2))
+                    kind = ("Rate limit" if status in RATE_LIMIT_STATUS_CODES
+                            else f"Transient HTTP {status}")
                     logger.warning(
-                        f"Rate limit hit (attempt {attempt + 1}/{max_retries}), "
+                        f"{kind} (attempt {attempt + 1}/{max_retries}), "
                         f"retrying in {wait:.1f}s..."
                     )
                     time.sleep(wait)
@@ -239,6 +255,9 @@ class SheetsClient:
         """
         link_fields = set(link_fields)
         data, rich_requests = [], []
+        # (field, row, text) for every cell written as rich text, so the same
+        # content can be re-sent as plain values if the rich-text call fails.
+        fallback_cells = []
 
         for row, field_values in updates:
             for field, value in field_values.items():
@@ -253,6 +272,7 @@ class SheetsClient:
                     rich_requests.append(
                         self._rich_text_request(field, row, str(value))
                     )
+                    fallback_cells.append((field, row, str(value)))
                 else:
                     data.append(
                         {"range": self._cell_range(field, row), "values": [[value]]}
@@ -268,17 +288,41 @@ class SheetsClient:
                     body={"valueInputOption": "RAW", "data": data},
                 ).execute()
             )
+        linked = len(rich_requests)
         if rich_requests:
-            self._execute_with_retry(
-                lambda: self.sheets_service.spreadsheets().batchUpdate(
-                    spreadsheetId=self.sheet_id,
-                    body={"requests": rich_requests},
-                ).execute()
-            )
+            try:
+                self._execute_with_retry(
+                    lambda: self.sheets_service.spreadsheets().batchUpdate(
+                        spreadsheetId=self.sheet_id,
+                        body={"requests": rich_requests},
+                    ).execute()
+                )
+            except HttpError as e:
+                # The hyperlink is a convenience; the entry text is the record. So
+                # rather than lose the entry — and with it the status change that
+                # takes the row out of scope — write the same text as plain values
+                # and say the links are missing. A run that half-wrote its rows is
+                # far worse than one whose URLs are not clickable.
+                logger.warning(
+                    f"Rich-text write failed (HTTP {e.resp.status} {e.reason}); "
+                    f"falling back to plain text for {linked} cell(s) — the entries "
+                    f"will be written but their URLs will not be clickable."
+                )
+                fallback = [
+                    {"range": self._cell_range(field, row), "values": [[text]]}
+                    for field, row, text in fallback_cells
+                ]
+                self._execute_with_retry(
+                    lambda: self.sheets_service.spreadsheets().values().batchUpdate(
+                        spreadsheetId=self.sheet_id,
+                        body={"valueInputOption": "RAW", "data": fallback},
+                    ).execute()
+                )
+                linked = 0
 
         logger.info(
             f"Wrote detailed analysis to {len(updates)} row(s) "
-            f"({len(data)} value cell(s), {len(rich_requests)} linked cell(s))"
+            f"({len(data)} value cell(s), {linked} linked cell(s))"
         )
         return len(updates)
 
