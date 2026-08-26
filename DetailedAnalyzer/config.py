@@ -521,6 +521,33 @@ REPORT_NAME_NO_ID = "NoID"
 # people rather than parsed.
 REPORT_NAME_UNSAFE_CHARS = r'/\:*?"<>|'
 
+# --- The report's table name ------------------------------------------------
+# The template's grid is a Google Sheets TABLE object, and its name shows as a
+# chip above the header row. Every copy inherits the template's name, so without
+# this every report is headed "Table1" — the one place in the report that says
+# nothing about the tender it covers.
+#
+# Named for the tender and the run, so the chip identifies the brief the way the
+# file name does. Table names are not free text: measured 2026-08-26 against the
+# API, a space, underscore, period and apostrophe are all accepted and length is
+# not a practical limit, but a HYPHEN is rejected and a name may not START WITH A
+# DIGIT — they have to stay compatible with formula references.
+RENAME_REPORT_TABLE = True
+REPORT_TABLE_NAME_PATTERN = "{title} {runtime}"
+
+# The same instant as the file name's timestamp, to the second, with a space where
+# the file name has a hyphen — REPORT_RUNTIME_FORMAT's hyphen is illegal here. The
+# digits are identical, so a table and its file still match by eye.
+REPORT_TABLE_RUNTIME_FORMAT = "%Y%m%d %H%M%S"
+
+# Only the title is trimmed if the name gets long; the timestamp is what ties the
+# table to its file, so it is never cut.
+REPORT_TABLE_NAME_MAX_TITLE = 80
+
+# A title starting with a digit ("2026 Framework…") would make an illegal name, so
+# it gets this in front. Applied only when needed, so most names are untouched.
+REPORT_TABLE_LEADING_DIGIT_PREFIX = "Tender "
+
 # The copied report's tab is left as the template named it ("Detailed Analysis
 # Template"). The file name now carries the tender's identity, so renaming the tab
 # adds nothing — and the full report name would exceed the 100-character tab

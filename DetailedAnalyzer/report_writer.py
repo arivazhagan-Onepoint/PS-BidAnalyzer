@@ -36,6 +36,11 @@ from .config import (
     RENAME_REPORT_TAB,
     TEMPLATE_LABEL_COL,
     TEMPLATE_DETAIL_COL,
+    RENAME_REPORT_TABLE,
+    REPORT_TABLE_NAME_PATTERN,
+    REPORT_TABLE_RUNTIME_FORMAT,
+    REPORT_TABLE_NAME_MAX_TITLE,
+    REPORT_TABLE_LEADING_DIGIT_PREFIX,
 )
 from . import template as tpl
 
@@ -114,6 +119,33 @@ def report_name(tender_data: dict, run_dt) -> str:
     )
 
 
+# Everything a Sheets table name may not contain. Hyphens are the one that bites
+# in practice — tender titles are full of them, and so is the file name's
+# timestamp. Replaced with a space rather than removed, so "End-to-End" reads as
+# "End to End" and not "EndtoEnd".
+_TABLE_NAME_ILLEGAL = re.compile(r"[^0-9A-Za-z _]+")
+
+
+def table_name(tender_data: dict, run_dt) -> str:
+    """The report's table name: the tender's title plus the run timestamp.
+
+    Module level and credential-free, like report_name(), so a dry run can show
+    the exact name a real run would set without authenticating anything.
+    """
+    title = _TABLE_NAME_ILLEGAL.sub(" ", tender_data.get("Name", "") or "")
+    title = " ".join(title.split()) or "Untitled tender"
+    if len(title) > REPORT_TABLE_NAME_MAX_TITLE:
+        trimmed = title[:REPORT_TABLE_NAME_MAX_TITLE]
+        title = (trimmed.rsplit(" ", 1)[0] if " " in trimmed else trimmed).strip()
+
+    name = REPORT_TABLE_NAME_PATTERN.format(
+        title=title, runtime=run_dt.strftime(REPORT_TABLE_RUNTIME_FORMAT)
+    )
+    if name[:1].isdigit():
+        name = REPORT_TABLE_LEADING_DIGIT_PREFIX + name
+    return name
+
+
 class ReportWriter:
     def __init__(self):
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
@@ -164,6 +196,48 @@ class ReportWriter:
             }]},
         ).execute()
         return new_title
+
+    def rename_table(self, file_id: str, new_name: str) -> str:
+        """Rename the report's table object. Returns the name set, or "".
+
+        Never raises: the table name is a label on a report that is already
+        written, so failing to set it must not lose the brief. A template with no
+        table object at all is reported rather than treated as an error — someone
+        may have rebuilt the template as a plain range.
+        """
+        try:
+            meta = self.sheets.spreadsheets().get(
+                spreadsheetId=file_id, fields="sheets(tables(tableId,name))"
+            ).execute()
+            tables = (meta.get("sheets") or [{}])[0].get("tables") or []
+            if not tables:
+                logger.warning(
+                    f"Report {file_id} has no table object, so it cannot be named "
+                    f"{new_name!r}. The template's grid may no longer be a Sheets "
+                    f"table; set RENAME_REPORT_TABLE = False to stop trying."
+                )
+                return ""
+            self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=file_id,
+                body={"requests": [{
+                    "updateTable": {
+                        "table": {"tableId": tables[0]["tableId"], "name": new_name},
+                        "fields": "name",
+                    }
+                }]},
+            ).execute()
+            logger.info(f"Named the report's table {new_name!r}")
+            return new_name
+        except HttpError as e:
+            # Most likely an illegal name. Say which, since the rule is not obvious.
+            logger.warning(
+                f"Could not name the report's table {new_name!r}: HTTP "
+                f"{e.resp.status} {e.reason}. Table names cannot contain a hyphen "
+                f"or start with a digit."
+            )
+        except Exception as e:
+            logger.warning(f"Could not name the report's table {new_name!r}: {e}")
+        return ""
 
     def fill_report(self, file_id: str, brief, report_title: str = "") -> dict:
         """Write the brief into the copied report. Returns a small stats dict.
@@ -319,6 +393,10 @@ class ReportWriter:
         name = report_name(tender_data, run_dt)
         file_id, url = self.create_report(tender_data, run_dt)
         self.fill_report(file_id, brief, name)
+        # After filling, so a fill failure does not leave a correctly-named report
+        # with nothing in it.
+        if RENAME_REPORT_TABLE:
+            self.rename_table(file_id, table_name(tender_data, run_dt))
         return name, file_id, url
 
 
