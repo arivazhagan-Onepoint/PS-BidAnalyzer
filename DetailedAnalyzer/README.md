@@ -6,8 +6,8 @@ the tenders that cleared that gate and produces the written brief a bid team can
 work from.
 
 > **Status: running for real.** Reports are written to Drive, the tracker is
-> written back, and an analysed row moves `Docs(Ready)` → `Done` so it leaves
-> scope. What remains optional is `OUTPUT_FIELD_MAP` — the likelihood and report
+> written back, and an analysed row moves `Docs(Ready)` → `Analysis-Complete`,
+> so it leaves scope. What remains optional is `OUTPUT_FIELD_MAP` — the likelihood and report
 > link reach the tracker through the `Bid Qualification Reason(System)` and
 > `Comments` log entries, and only land in columns of their own once those columns
 > are added to the sheet by hand and mapped.
@@ -24,7 +24,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
                         analyse_tender_detail(tender.data)
                               │  Gemini, over three evidence streams:
                               │    · capability context  (shared, hand-authored)
-                              │    · source corpus       (Onepoint's own records)
+                              │    · source corpus       (records + onepointltd.com)
                               │    · tender pack         (this tender's documents)
                               │  + deterministic fields from the row and the clock
                               ▼
@@ -33,7 +33,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
                               │      copy of the template, filled, in Drive
                               ▼
                         SheetsClient.write_updates()   ← gated on WRITE_BACK_ENABLED
-   updates: Bid Qualification → Done · [Bid Qualification Reason(System)]
+   updates: Bid Qualification → Analysis-Complete · [Bid Qualification Reason(System)]
             [Comments] [Processed Date] [Last Modified Date] + OUTPUT_FIELD_MAP
 ```
 
@@ -48,6 +48,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
 | `config.py` | Model budget, scope, output mapping, write-back switch. Re-exports the root `config.py`. |
 | `gemini_client.py` | Native Gemini client wrapper (own copy, so the two stages stay independent). |
 | `onepoint_context.py` | Loads the **shared** capability context from `analyzer/knowledge/`. |
+| `web_text.py` | Fetches a web page and strips it to readable text — boilerplate, furniture, repeated paragraphs. |
 | `sheets_client.py` | Slim sheet read + write. No row colouring or tab sync — those stay the analyzer's. |
 | `knowledge/` | Stage-specific reference material (the capability file is **not** duplicated here). |
 
@@ -55,7 +56,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
 
 ```bash
 # From the project root
-python -m DetailedAnalyzer.sources             # build/refresh the source corpus
+python -m DetailedAnalyzer.sources             # refresh the corpus (records + website)
 python -m DetailedAnalyzer.sources --dry-run   # render to stdout, write nothing
 
 python -m DetailedAnalyzer.main                # every in-scope row
@@ -178,7 +179,7 @@ green. Three things happen instead:
    handle, so the cap is what stops such a row returning forever. Attempts are
    counted from the `incomplete pack, attempt N` marker the entry itself leaves in
    `Bid Qualification Reason(System)`, so no extra tracker column is needed. On
-   the last attempt the row is marked `Done` anyway and the entry says so, naming
+   the last attempt the row is marked `Analysis-Complete` anyway and the entry says so, naming
    the documents and how to undo it.
 
 3. **The pack is not cached.** The fingerprint covers only the files and the
@@ -219,7 +220,7 @@ by the root `.gitignore`'s `*.log`.
   (`maintain_knowledge.py`) because its precedent is distilled from human
   decisions. Nothing equivalent exists for this stage.
 
-It *does* write `Bid Qualification` (`Docs(Ready)` → `Done`), reversing an earlier
+It *does* write `Bid Qualification` (`Docs(Ready)` → `Analysis-Complete`), reversing an earlier
 note — which follows from `Docs(Ready)` being the gate: whatever consumes a
 workflow status has to be what advances it.
 

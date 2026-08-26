@@ -422,7 +422,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
     logger.info(f"  Errors        : {summary['errors']}")
     logger.info(f"  Rows written  : {summary['written']}"
                 f"{'' if summary['write_back_enabled'] else ' (write-back disabled)'}")
-    logger.info(f"  Marked {COMPLETED_STATUS:<7}: {summary['marked_done']}"
+    logger.info(f"  Marked {COMPLETED_STATUS:<11}: {summary['marked_done']}"
                 f" (out of scope for future runs)")
     logger.info("=" * 80)
     return summary

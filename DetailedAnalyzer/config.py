@@ -407,14 +407,21 @@ STATUS_FIELD = "Bid Qualification"
 
 # --- Marking a row complete -------------------------------------------------
 # What stops a row being analysed again. On success the row's STATUS_FIELD is
-# moved from 'Docs(Ready)' to 'Done', which takes it out of PROCESS_STATUSES and
+# moved from 'Docs(Ready)' to this, which takes it out of PROCESS_STATUSES and
 # therefore out of scope — the exit condition this stage previously lacked, and
 # the reason the first two runs produced two reports for the same tender.
 #
 # Note this means the stage DOES write STATUS_FIELD, unlike its earlier design.
 # That follows from 'Docs(Ready)' being the gate: whatever consumes a workflow
 # status has to be what advances it, or the workflow cannot move.
-COMPLETED_STATUS = "Done"
+#
+# Named for what happened rather than for a generic end-state: a tracker column
+# read by people alongside Bid(AI)/NoBid(Human)/Docs(Ready) is clearer when every
+# value says which step it refers to. Changed from 'Done' 2026-08-25. Nothing
+# keys off the literal — scope is PROCESS_STATUSES and this value is simply not in
+# it — so rows still carrying the old 'Done' remain out of scope and need no
+# migration for correctness, only for a tidy vocabulary.
+COMPLETED_STATUS = "Analysis-Complete"
 MARK_COMPLETE = True
 
 # --- Where the report link is recorded --------------------------------------
