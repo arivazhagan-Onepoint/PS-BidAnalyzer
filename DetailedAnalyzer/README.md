@@ -6,7 +6,7 @@ the tenders that cleared that gate and produces the written brief a bid team can
 work from.
 
 > **Status: running for real.** Reports are written to Drive, the tracker is
-> written back, and an analysed row moves `Docs(Ready)` → `Analysis-Complete`,
+> written back, and an analysed row moves `Docs-Ready` → `Analysis-Complete`,
 > so it leaves scope. What remains optional is `OUTPUT_FIELD_MAP` — the likelihood and report
 > link reach the tracker through the `Bid Qualification Reason(System)` and
 > `Comments` log entries, and only land in columns of their own once those columns
@@ -173,7 +173,7 @@ green. Three things happen instead:
    ```
 
 2. **The status is left alone** (`MARK_COMPLETE_REQUIRES_FULL_PACK`), so the row
-   stays in `Docs(Ready)` and a later run redoes it against the full pack — but
+   stays in `Docs-Ready` and a later run redoes it against the full pack — but
    only up to `TENDER_DOCS_MAX_ATTEMPTS` (3). Every kind of read failure is
    treated the same way; no exception is made for a format this layer cannot
    handle, so the cap is what stops such a row returning forever. Attempts are
@@ -220,8 +220,8 @@ by the root `.gitignore`'s `*.log`.
   (`maintain_knowledge.py`) because its precedent is distilled from human
   decisions. Nothing equivalent exists for this stage.
 
-It *does* write `Bid Qualification` (`Docs(Ready)` → `Analysis-Complete`), reversing an earlier
-note — which follows from `Docs(Ready)` being the gate: whatever consumes a
+It *does* write `Bid Qualification` (`Docs-Ready` → `Analysis-Complete`), reversing an earlier
+note — which follows from `Docs-Ready` being the gate: whatever consumes a
 workflow status has to be what advances it.
 
 ## Still open

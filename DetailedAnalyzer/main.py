@@ -43,6 +43,7 @@ from .config import (
     REPORTS_FOLDER_ID,
     EMAIL_LINK_REPORTS,
     should_analyse,
+    is_near_miss,
     already_detailed,
 )
 from .detailed_analyzer import analyse_tender_detail
@@ -235,7 +236,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
                "written": 0, "reports": 0, "report_errors": 0,
                "Bid": 0, "TBD": 0, "NoBid": 0, "marked_done": 0, "report_refs": [],
                "with_docs": 0, "without_docs": 0, "docs_read": 0,
-               "doc_warnings": [], "pack_capped": 0,
+               "doc_warnings": [], "pack_capped": 0, "status_warnings": [],
                "write_back_enabled": WRITE_BACK_ENABLED and not dry_run,
                "reports_enabled": REPORTS_ENABLED and not dry_run,
                "dry_run": dry_run}
@@ -257,6 +258,24 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         f"{len(eligible)} of {len(tenders)} row(s) are in scope "
         f"({sorted(PROCESS_STATUSES)}); processing those"
     )
+
+    # Rows whose status reads as in-scope but is spelled differently. Nothing here
+    # writes the gate value, so this cannot be prevented — only surfaced, which is
+    # the point: a row nobody knows was skipped is worse than one that failed.
+    near = {}
+    for t in tenders:
+        status = (t.data.get(STATUS_FIELD, "") or "").strip()
+        if is_near_miss(status):
+            near[status] = near.get(status, 0) + 1
+    for status, count in sorted(near.items()):
+        msg = (
+            f"{count} row(s) have {STATUS_FIELD} = '{status}', which reads as in "
+            f"scope but does not match {sorted(PROCESS_STATUSES)} exactly — they "
+            f"were NOT analysed. Correct the spelling in the tracker to have them "
+            f"picked up."
+        )
+        logger.warning(msg)
+        summary["status_warnings"].append(msg)
 
     # One writer for the whole run — it authenticates on construction, so building
     # it per row would re-auth for every tender. Built only when it will be used.
@@ -545,12 +564,12 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
     # pair of versions, a truncation — is a caveat on the brief that was produced,
     # not a run error, so it is surfaced beside the metrics rather than buried in
     # the log where nobody reads it.
-    doc_warnings = s.get("doc_warnings") or []
+    doc_warnings = (s.get("status_warnings") or []) + (s.get("doc_warnings") or [])
     doc_warning_block = ""
     if doc_warnings:
         items = "".join(f"<li>{html_escape(w)}</li>" for w in doc_warnings)
         doc_warning_block = f"""\
-  <h3 style="margin:16px 0 4px;font-size:15px">Tender pack caveats ({len(doc_warnings)})</h3>
+  <h3 style="margin:16px 0 4px;font-size:15px">Caveats ({len(doc_warnings)})</h3>
   <ul style="font-size:13px;background:#fff8e1;border:1px solid #ffe08a;
              border-radius:4px;padding:10px 10px 10px 28px">{items}</ul>"""
 

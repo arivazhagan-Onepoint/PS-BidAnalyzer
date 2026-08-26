@@ -12,6 +12,7 @@ does real work. They are deliberately explicit rather than absent, so the
 unfinished parts are visible in one file instead of scattered through the code.
 """
 import os
+import re
 
 # Re-export all shared project configuration (DATASET_FIELDS, SHEET_NAME,
 # TARGET_FOLDER_ID, SCOPES, SERVICE_ACCOUNT_FILE, UK_TIMEZONE, CREDENTIALS_DIR,
@@ -386,37 +387,39 @@ TENDER_DOCS_WARN_UNRESOLVED = True
 TENDER_DOCS_MANIFEST_FIELD = None
 
 # --- Which rows get a detailed analysis -------------------------------------
-# Confirmed 2026-08-21: scope is the single status 'Docs(Ready)'. Compared
-# case-insensitively after trimming.
+# Scope is the single status 'Docs-Ready'. Compared case-insensitively after
+# trimming.
 #
-# This is a better gate than the Bid statuses it replaced, and for a specific
-# reason: a detailed brief is only worth producing once the tender's documents
-# are actually available to read. 'Bid(AI)' says someone thinks the opportunity is
-# worth pursuing, which is not the same thing — briefing a tender whose pack has
-# not landed yet produces an assessment built on the notice summary alone.
-# 'Docs(Ready)' asserts the input this stage needs.
+# This is a better gate than the Bid statuses it originally replaced, and for a
+# specific reason: a detailed brief is only worth producing once the tender's
+# documents are actually available to read. 'Bid(AI)' says someone thinks the
+# opportunity is worth pursuing, which is not the same thing — briefing a tender
+# whose pack has not landed yet produces an assessment built on the notice
+# summary alone. 'Docs-Ready' asserts the input this stage needs.
 #
-# Note this set has no natural exit condition the way the analyzer's does — a
-# 'Docs(Ready)' row stays 'Docs(Ready)' after this module runs, so it would be
-# picked up again on every subsequent run. Whatever marks a row as already-detailed
-# is the other half of this decision; see ALREADY_DETAILED_FIELD below.
-PROCESS_STATUSES = {"Docs(Ready)"}
+# Spelled 'Docs-Ready' since 2026-08-25, previously 'Docs(Ready)'. Nothing in this
+# project writes it — it is set by hand or by the upstream scraper — so the risk of
+# renaming a GATE is not a broken write but a silent one: a row spelled the old way
+# would simply never be selected, and this stage has no date filter precisely so
+# that a row missed once is picked up later. is_near_miss() below exists to make
+# that loud instead.
+PROCESS_STATUSES = {"Docs-Ready"}
 
 # Column holding the qualification status used for the filter above.
 STATUS_FIELD = "Bid Qualification"
 
 # --- Marking a row complete -------------------------------------------------
 # What stops a row being analysed again. On success the row's STATUS_FIELD is
-# moved from 'Docs(Ready)' to this, which takes it out of PROCESS_STATUSES and
+# moved from 'Docs-Ready' to this, which takes it out of PROCESS_STATUSES and
 # therefore out of scope — the exit condition this stage previously lacked, and
 # the reason the first two runs produced two reports for the same tender.
 #
 # Note this means the stage DOES write STATUS_FIELD, unlike its earlier design.
-# That follows from 'Docs(Ready)' being the gate: whatever consumes a workflow
+# That follows from 'Docs-Ready' being the gate: whatever consumes a workflow
 # status has to be what advances it, or the workflow cannot move.
 #
 # Named for what happened rather than for a generic end-state: a tracker column
-# read by people alongside Bid(AI)/NoBid(Human)/Docs(Ready) is clearer when every
+# read by people alongside Bid(AI)/NoBid(Human)/Docs-Ready is clearer when every
 # value says which step it refers to. Changed from 'Done' 2026-08-25. Nothing
 # keys off the literal — scope is PROCESS_STATUSES and this value is simply not in
 # it — so rows still carrying the old 'Done' remain out of scope and need no
@@ -446,7 +449,7 @@ LINK_FIELDS = (SYSTEM_REASON_FIELD, "Comments")
 
 # Only ever marked after a report exists. A row marked Done whose report failed
 # to write would be silently stranded — out of scope, with nothing to show for
-# it — so a report failure deliberately leaves the row in 'Docs(Ready)' for the
+# it — so a report failure deliberately leaves the row in 'Docs-Ready' for the
 # next run to retry.
 MARK_COMPLETE_REQUIRES_REPORT = True
 
@@ -568,6 +571,28 @@ def should_analyse(status: str) -> bool:
     reach the model or the per-row log.
     """
     return (status or "").strip().lower() in {s.lower() for s in PROCESS_STATUSES}
+
+
+def _squash(status: str) -> str:
+    """Reduce a status to letters and digits: 'Docs (Ready)' -> 'docsready'."""
+    return re.sub(r"[^a-z0-9]+", "", (status or "").lower())
+
+
+_SCOPE_SQUASHED = {_squash(s) for s in PROCESS_STATUSES}
+
+
+def is_near_miss(status: str) -> bool:
+    """True for a status that READS as in scope but does not match exactly.
+
+    'Docs(Ready)', 'Docs (Ready)', 'docs_ready' all squash to the same thing as
+    'Docs-Ready' and all fail should_analyse(). Nothing here writes the gate value,
+    so a row spelled a hair differently is not a bug this code can prevent — but a
+    row sitting unprocessed with nobody aware of it is the failure mode this stage
+    works hardest to avoid, which is why the run says so loudly rather than
+    quietly skipping it.
+    """
+    return bool((status or "").strip()) and not should_analyse(status) \
+        and _squash(status) in _SCOPE_SQUASHED
 
 
 def already_detailed(row: dict) -> bool:
