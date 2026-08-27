@@ -37,3 +37,9 @@ __pycache__/
 #Project specific configuration files to be exluded
 project_config*.json
 project_config.json
+
+# Prompt dumps written by dump_prompts.py — regenerate them with that script
+# rather than tracking them. The .full.txt expansions must never be committed:
+# they inline the corpus and heuristics ignored above. The skeleton views are
+# safe in themselves, but carry a generation timestamp that churns every run.
+prompts/*.txt
