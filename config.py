@@ -32,6 +32,36 @@ BIDS_SHEET_NAME   = _project["google_sheets"].get("bids_tab_name", "PS Bids")
 # require auth) live in the gitignored credentials/smtp_credentials.json.
 NOTIFICATIONS = _project.get("notifications", {})
 
+# Google Drive locations, from the "google_drive_locations" block of
+# project_config.json. Used only by the detailed-analysis stage: "Source_Docs"
+# holds Onepoint's own evidence sheets (ingested into the corpus), "Tender_Docs"
+# holds one subfolder of buyer documents per tender, and "Analysis_Reports" is
+# where every brief is published. Configured rather than coded so each
+# environment can read and publish to its own folders — and so this file stays
+# the one place a Drive target is set. Read them through drive_location().
+DRIVE_LOCATIONS = _project.get("google_drive_locations", {})
+
+
+def drive_location(key: str) -> str:
+    """The Drive folder ID configured under ``google_drive_locations[key]``.
+
+    Raises rather than falling back to a default, because a wrong or absent
+    folder ID does not fail loudly further down: Drive answers "no such folder"
+    exactly as it answers "empty folder", so a run would report no documents and
+    produce a brief that reads as complete. Validated on read rather than at
+    import, so the modules that never touch Drive are unaffected by a missing
+    block.
+    """
+    value = (DRIVE_LOCATIONS.get(key) or "").strip()
+    if not value:
+        raise ValueError(
+            f'google_drive_locations.{key} is missing or empty in '
+            f'project_config.json. Add the Drive folder ID (the last part of the '
+            f'folder URL): "google_drive_locations": {{"{key}": "<folder id>"}}'
+        )
+    return value
+
+
 # FTS API
 FTS_API_BASE = "https://www.find-tender.service.gov.uk/api/1.0"
 PORTAL_URL   = "https://www.find-tender.service.gov.uk/Notice"

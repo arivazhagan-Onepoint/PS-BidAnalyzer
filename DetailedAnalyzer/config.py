@@ -22,6 +22,7 @@ from config import (  # explicit for linters
     BASE_DIR as PROJECT_ROOT,
     CREDENTIALS_DIR,
     UK_TIMEZONE,
+    drive_location,
 )
 
 # --- Paths ------------------------------------------------------------------
@@ -71,7 +72,9 @@ API_THROTTLE_SECONDS = 10   # back-off between failed attempts, not a throttle
 # API is Gemini Notebook Enterprise only, on licensed Cloud projects). The Drive
 # folder below is the ingestible replacement, and the project's existing service
 # account can already read it.
-SOURCES_FOLDER_ID = "1mcKppNQAIwxq3zArDw1VHpfMuMcHiXn4"   # "Bid Analyzer - Sources"
+# Set in project_config.json under google_drive_locations.Source_Docs — normally
+# the shared-drive folder named "Bid Analyzer - Sources".
+SOURCES_FOLDER_ID = drive_location("Source_Docs")
 
 # Rendered corpus, built by `python -m DetailedAnalyzer.sources` and read by every
 # analysis run. Cached on disk so a run costs no Drive/Sheets calls, and so the
@@ -272,7 +275,9 @@ SKIP_TABS = ("read me", "declaration")
 # Deliberately NOT part of sources.py. That corpus is tender-independent and
 # cached on its own cadence; a pack arrives with its tender, so it is fetched
 # during the run, per row.
-TENDER_DOCS_FOLDER_ID = "16wMwZ_VpJ0GkhoCEUMpWqoqjPfq5QdW3"   # "Tender Documents"
+# Set in project_config.json under google_drive_locations.Tender_Docs — normally
+# the shared-drive folder named "Tender Documents".
+TENDER_DOCS_FOLDER_ID = drive_location("Tender_Docs")
 TENDER_DOCS_ENABLED = True
 
 # Subfolder per tender, named "<OCID>-<Tender Title>". Matched on the OCID prefix
@@ -494,7 +499,10 @@ ALREADY_DETAILED_FIELD = None
 # a sheet whose structure is maintained by hand.
 TEMPLATE_SPREADSHEET_ID = "1ImvX_fN7UHfgLFXV1to5V2pTZrGSJStPw3rHnBn6FLA"
 TEMPLATE_TAB_NAME = "Detailed Analysis Template"
-REPORTS_FOLDER_ID = "1yJ6tTlVB_R696RgwuipL2RTmdnnvxq10"
+# Where every report is published. Set in project_config.json under
+# google_drive_locations.Analysis_Reports, so each environment can publish to its
+# own folder — a Dev run must not drop briefs where the bid team reads them.
+REPORTS_FOLDER_ID = drive_location("Analysis_Reports")
 
 # Report file name: PortalName-TenderID-TenderTitle-Report-RunTime.
 # The run time is part of the name on purpose — it makes every run's output

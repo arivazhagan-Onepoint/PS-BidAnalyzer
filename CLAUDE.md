@@ -57,7 +57,14 @@ There is no automated test suite yet; `--limit` is the quick-check mechanism.
   SMTP relays that require auth (e.g. AWS SES). Omit the file entirely for an
   unauthenticated internal relay.
 - `project_config.json` — `google_sheets` (`sheet_name`, `target_folder_id`,
-  `environment`) plus a `notifications` block (see Email notifications below).
+  `environment`), a `notifications` block (see Email notifications below), and a
+  `google_drive_locations` block (`Source_Docs`, `Tender_Docs`,
+  `Analysis_Reports`) giving the Drive folders the DetailedAnalyzer reads and
+  publishes its briefs to. None of the three has a **default** —
+  `config.drive_location()` raises if any is missing. Drive reports a wrong
+  folder ID and an empty folder identically, so a silent fallback would produce
+  a brief that looks complete on no documents at all — or publish every brief
+  into a folder nobody is reading.
 
 See `SETUP.md` for the full step-by-step (service account, sheet sharing, etc.).
 

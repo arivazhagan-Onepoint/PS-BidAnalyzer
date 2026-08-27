@@ -102,6 +102,11 @@ Edit `project_config.json`:
     "sheet_name": "PS Tender Tracker",
     "nobids_tab_name": "PS NoBids",
     "bids_tab_name": "PS Bids"
+  },
+  "google_drive_locations": {
+    "Source_Docs": "<Drive folder ID of 'Bid Analyzer - Sources'>",
+    "Tender_Docs": "<Drive folder ID of 'Tender Documents'>",
+    "Analysis_Reports": "<Drive folder ID the briefs are published to>"
   }
 }
 ```
@@ -113,6 +118,19 @@ Edit `project_config.json`:
 | `sheet_name` | Exact name of the target Google Sheet **and** its tab |
 | `nobids_tab_name` | Tab collecting `NoBid(Human)` rows (default `PS NoBids`) — only used by the maintenance flow |
 | `bids_tab_name` | Tab collecting `Bid(Human)` rows (default `PS Bids`) — only used by the maintenance flow |
+| `google_drive_locations.Source_Docs` | Folder holding Onepoint's own evidence sheets, ingested into the corpus — only used by the DetailedAnalyzer stage |
+| `google_drive_locations.Tender_Docs` | Folder holding one `<OCID>-<Tender Title>` subfolder of buyer documents per tender — only used by the DetailedAnalyzer stage |
+| `google_drive_locations.Analysis_Reports` | Folder every brief is published into, one report file per tender — only used by the DetailedAnalyzer stage |
+
+All three Drive folders must be shared with the service account — Viewer is
+enough for the two it reads, but the reports folder needs **Contributor/Editor**,
+since the briefs are created there.
+
+There is **no default** for any of the three: the DetailedAnalyzer refuses to
+import without them, rather than reading the wrong folder and reporting an empty
+result as "no documents found", or publishing briefs somewhere nobody is looking.
+The analyzer stage never touches them, so it runs whether or not the block is
+present.
 
 The two collection tabs are **only needed if you run the maintenance flow** (Step 7). Create each one by hand with a **header row in row 1** naming the columns to copy across — the same header in both is simplest:
 

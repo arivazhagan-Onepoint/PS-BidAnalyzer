@@ -72,7 +72,9 @@ cache; `load_corpus()` is all an analysis run touches, so a run costs no API
 calls and the exact text sent to the model stays on disk to be audited.
 
 Source of truth is the Drive shared drive **Bid Analyzer - Sources**
-(`config.SOURCES_FOLDER_ID`), read by the project's existing service account.
+(`config.SOURCES_FOLDER_ID`, set in `project_config.json` under
+`google_drive_locations.Source_Docs`), read by the project's existing service
+account.
 The NotebookLM / Gemini Notebook links in `Requirements.md` are **not** ingestible
 — they are consumer notebooks behind a Google sign-in wall, and the official API
 is Gemini Notebook Enterprise only. A notebook is just a wrapper over source
@@ -111,7 +113,8 @@ buyer's own published pack for **one** tender — the ITT, the draft contract, t
 code of conduct — and it is what turns "Mandatory Requirement" from an inference
 off a scraped notice into a statement of what a bid is evaluated against.
 
-Source is the Drive folder in `config.TENDER_DOCS_FOLDER_ID`, holding one
+Source is the Drive folder in `config.TENDER_DOCS_FOLDER_ID` (set in
+`project_config.json` under `google_drive_locations.Tender_Docs`), holding one
 subfolder per tender named `<OCID>-<Tender Title>`. Matching is on the **OCID
 prefix alone** — it is the OCDS global identifier, stable and distinct across all
 529 tracker rows, whereas the title half gets reworded. That also excludes the
@@ -188,7 +191,9 @@ green. Three things happen instead:
 
 Why the cap exists: a format outside `TENDER_DOCS_SUPPORTED_MIMES` fails
 identically every run, and each run costs a fresh Gemini call plus **another
-timestamped report** in a Drive folder the service account can add to but not
+timestamped report** in the Drive folder set by
+`google_drive_locations.Analysis_Reports` in `project_config.json`
+(`config.REPORTS_FOLDER_ID`), which the service account can add to but not
 delete from (`canAddChildren: True`, `canDelete: False`). `AnalysisReports`
 already holds four reports for one tender, from the era before anything moved a
 row out of scope — the shape `c924792` fixed. Supporting `.xlsx` removes the
