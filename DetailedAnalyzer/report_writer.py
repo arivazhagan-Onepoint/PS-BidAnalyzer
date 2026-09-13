@@ -2,7 +2,17 @@
 Report writer — one completed brief per tender, as a copy of the template.
 
 Copies the Bid Analyser reporting template into the reports folder, renames it
-after the tender, and fills column B against the labels already in column A.
+after the tender, and fills columns B and C against the labels already in
+column A.
+
+The template is found by NAME (project_config.json's
+google_sheets.Reporting_Template) inside the Reporting_Templates folder, not by a
+hardcoded file ID. The folder holds several versions side by side, so the ID a
+brief is built from is a thing the bid team changes, and a config edit is the
+right size of change for it. The lookup insists on exactly one match: two
+same-named templates would otherwise be chosen between by Drive's listing order,
+and every brief afterwards would be built from whichever it happened to return
+first — a difference nobody would see in the output.
 
 Why copy rather than build a sheet from scratch: the template carries formatting,
 column widths and section styling that someone deliberately set up, and it is the
@@ -25,7 +35,8 @@ from googleapiclient.errors import HttpError
 from .config import (
     SCOPES,
     SERVICE_ACCOUNT_FILE,
-    TEMPLATE_SPREADSHEET_ID,
+    REPORTING_TEMPLATE_NAME,
+    REPORTING_TEMPLATES_FOLDER_ID,
     REPORTS_FOLDER_ID,
     REPORT_NAME_PATTERN,
     REPORT_RUNTIME_FORMAT,
@@ -36,14 +47,11 @@ from .config import (
     RENAME_REPORT_TAB,
     TEMPLATE_LABEL_COL,
     TEMPLATE_DETAIL_COL,
+    TEMPLATE_MORE_COL,
 )
 from . import template as tpl
 
 logger = logging.getLogger(__name__)
-
-# Section 3's rows do not exist in the template — they are generated per tender —
-# so they are appended under its heading. This is the heading to find.
-SECTION_3_HEADING = "3. Fit Assessment (Matrix Check)"
 
 
 def _normalise(label: str) -> str:
@@ -55,6 +63,20 @@ def _normalise(label: str) -> str:
     stray colon from silently dropping a row.
     """
     return re.sub(r"[^a-z0-9]+", " ", (label or "").lower()).strip()
+
+
+def _first_line(label: str) -> str:
+    """Normalised key for just the first line of a template row.
+
+    Several rows in this template are a field name followed by guidance on
+    continuation lines — "Summary" then "< please provide a summary of
+    Route-To-Market… >", "Likelihood of Winning" then all four band definitions,
+    each flag row then the bullets describing what to list. Normalising the whole
+    cell buries the field name in the guidance, and the prefix match below
+    refuses short keys, so "Summary" matched nothing at all. Keying on the first
+    line as well finds these without loosening the prefix rule for everything.
+    """
+    return _normalise((label or "").replace("\r", "\n").split("\n")[0])
 
 
 # A label must be at least this long before a prefix match is trusted. Short keys
@@ -119,6 +141,51 @@ class ReportWriter:
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
         self.sheets = build("sheets", "v4", credentials=creds)
         self.drive = build("drive", "v3", credentials=creds)
+        self._template_id = None
+
+    # --- resolve --------------------------------------------------------------
+    def template_id(self) -> str:
+        """The configured reporting template's file ID, looked up once per run.
+
+        Resolved lazily rather than at import so that nothing which merely imports
+        this module pays for a Drive call, and cached on the instance so a run
+        analysing forty tenders still only asks once.
+        """
+        if self._template_id:
+            return self._template_id
+
+        query = (
+            f"name='{REPORTING_TEMPLATE_NAME}' and "
+            f"'{REPORTING_TEMPLATES_FOLDER_ID}' in parents and "
+            f"mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
+        )
+        files = self.drive.files().list(
+            q=query, spaces="drive", fields="files(id,name)", pageSize=10,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute().get("files", [])
+
+        if not files:
+            raise FileNotFoundError(
+                f"Reporting template {REPORTING_TEMPLATE_NAME!r} was not found in "
+                f"Drive folder {REPORTING_TEMPLATES_FOLDER_ID}. Check "
+                f"google_sheets.Reporting_Template in project_config.json matches "
+                f"the file name exactly, and that the service account can see the "
+                f"folder."
+            )
+        if len(files) > 1:
+            raise RuntimeError(
+                f"{len(files)} spreadsheets in folder {REPORTING_TEMPLATES_FOLDER_ID} "
+                f"are named {REPORTING_TEMPLATE_NAME!r} ({', '.join(f['id'] for f in files)}). "
+                f"Rename or remove all but one — picking between them would make "
+                f"every brief depend on Drive's listing order."
+            )
+
+        self._template_id = files[0]["id"]
+        logger.info(
+            f"Reporting template {REPORTING_TEMPLATE_NAME!r} resolved to "
+            f"{self._template_id}"
+        )
+        return self._template_id
 
     # --- copy -----------------------------------------------------------------
     def create_report(self, tender_data: dict, run_dt) -> tuple:
@@ -126,7 +193,7 @@ class ReportWriter:
         name = report_name(tender_data, run_dt)
         try:
             copied = self.drive.files().copy(
-                fileId=TEMPLATE_SPREADSHEET_ID,
+                fileId=self.template_id(),
                 body={"name": name, "parents": [REPORTS_FOLDER_ID]},
                 fields="id,webViewLink",
                 supportsAllDrives=True,
@@ -185,23 +252,40 @@ class ReportWriter:
         ).execute()
         col_a = [(r[0] if r else "") for r in labels_res.get("values", [])]
 
-        by_label = {}
+        by_label, by_first_line = {}, {}
         for i, label in enumerate(col_a, start=1):
             key = _normalise(label)
             if key and key not in by_label:
                 by_label[key] = i
+            head = _first_line(label)
+            if head and head not in by_first_line:
+                by_first_line[head] = i
+
+        def find_row(field_label: str):
+            """The report row a field belongs in, or None.
+
+            Tried in order of how much is being assumed: the label exactly, the
+            label the template.py alias says the sheet uses, the row's first line,
+            then a unique prefix. Each step is looser than the last, which is why
+            they are not collapsed — an exact hit should never be overridden by a
+            fuzzy one.
+            """
+            for candidate in (field_label, tpl.sheet_label(field_label)):
+                key = _normalise(candidate)
+                if key in by_label:
+                    return by_label[key]
+                if key in by_first_line:
+                    return by_first_line[key]
+            # Fall back to a prefix match. Some template rows carry guidance
+            # after the field name — "Likelihood of Winning" is followed by all
+            # four band definitions on continuation lines — so an exact match
+            # misses them. Without this the most important row in the brief
+            # (the likelihood itself) silently stayed empty.
+            return _prefix_match(_normalise(field_label), by_label)
 
         data, written, unmatched = [], 0, []
         for label, value in brief.fields.items():
-            key = _normalise(label)
-            row = by_label.get(key)
-            if not row:
-                # Fall back to a prefix match. Some template rows carry guidance
-                # after the field name — "Likelihood of Winning" is followed by all
-                # four band definitions on continuation lines — so an exact match
-                # misses them. Without this the most important row in the brief
-                # (the likelihood itself) silently stayed empty.
-                row = _prefix_match(key, by_label)
+            row = find_row(label)
             if not row:
                 unmatched.append(label)
                 continue
@@ -210,6 +294,22 @@ class ReportWriter:
                 "values": [[value]],
             })
             written += 1
+
+        # Column C, for the rows whose header asks a second question. Sparse by
+        # design: a row absent from brief.details is skipped rather than cleared,
+        # so nothing this tool writes wipes a note somebody typed there.
+        more_written = 0
+        for label, value in (brief.details or {}).items():
+            row = find_row(label)
+            if not row:
+                if label not in unmatched:
+                    unmatched.append(label)
+                continue
+            data.append({
+                "range": f"'{tab_name}'!{TEMPLATE_MORE_COL}{row}",
+                "values": [[value]],
+            })
+            more_written += 1
 
         if unmatched:
             # Not fatal, but it means the template and template.py have diverged —
@@ -226,92 +326,13 @@ class ReportWriter:
                 body={"valueInputOption": "RAW", "data": data},
             ).execute()
 
-        dims_written = self._write_fit_dimensions(
-            file_id, tab_name, col_a, brief.fit_dimensions
-        )
-
         logger.info(
-            f"Filled report {file_id}: {written} field(s), "
-            f"{dims_written} fit dimension(s)"
+            f"Filled report {file_id}: {written} field(s) in column "
+            f"{TEMPLATE_DETAIL_COL}, {more_written} in column {TEMPLATE_MORE_COL}"
         )
         return {"fields_written": written, "unmatched": unmatched,
-                "dimensions_written": dims_written}
-
-    def _write_fit_dimensions(self, file_id: str, tab_name: str, col_a: list,
-                              dimensions: list) -> int:
-        """Insert Section 3's per-tender rows under its heading.
-
-        The template ships Section 3 pre-filled with the Met Office tender's
-        dimensions. Those belong to a different tender, so the block is rewritten:
-        rows between the Section 3 heading and the next numbered section are
-        cleared, then this tender's dimensions are written in their place. Rows are
-        inserted when there is not enough room, so a tender with nine dimensions
-        does not overwrite Section 4.
-        """
-        if not dimensions:
-            return 0
-
-        heading_row = None
-        for i, label in enumerate(col_a, start=1):
-            if _normalise(label) == _normalise(SECTION_3_HEADING):
-                heading_row = i
-                break
-        if heading_row is None:
-            logger.warning(
-                f"Section 3 heading {SECTION_3_HEADING!r} not found in the report; "
-                f"{len(dimensions)} fit dimension(s) not written"
-            )
-            return 0
-
-        # Find where the next section starts, so the block's extent is known.
-        next_section = None
-        for i in range(heading_row, len(col_a)):
-            label = (col_a[i] or "").strip()
-            if re.match(r"^\d+\.\s", label) and i + 1 > heading_row:
-                next_section = i + 1
-                break
-        if next_section is None:
-            next_section = heading_row + 1
-
-        slots = next_section - heading_row - 1        # blank/example rows available
-        needed = len(dimensions)
-
-        if needed > slots:
-            # Make room rather than writing over Section 4.
-            self.sheets.spreadsheets().batchUpdate(
-                spreadsheetId=file_id,
-                body={"requests": [{
-                    "insertDimension": {
-                        "range": {
-                            "sheetId": self._first_tab(file_id)["sheetId"],
-                            "dimension": "ROWS",
-                            "startIndex": heading_row,          # 0-based: after heading
-                            "endIndex": heading_row + (needed - slots),
-                        },
-                        "inheritFromBefore": False,
-                    }
-                }]},
-            ).execute()
-
-        start = heading_row + 1
-        rows = [
-            [d["dimension"], f"{d['rating']} — {d['assessment']}"]
-            for d in dimensions
-        ]
-        # Clear any leftover template dimensions below what we are writing.
-        if slots > needed:
-            self.sheets.spreadsheets().values().clear(
-                spreadsheetId=file_id,
-                range=f"'{tab_name}'!A{start + needed}:B{start + slots - 1}",
-            ).execute()
-
-        self.sheets.spreadsheets().values().update(
-            spreadsheetId=file_id,
-            range=f"'{tab_name}'!A{start}",
-            valueInputOption="RAW",
-            body={"values": rows},
-        ).execute()
-        return len(rows)
+                "details_written": more_written,
+                "dimensions_written": len(brief.fit_dimensions or [])}
 
     # --- one call -------------------------------------------------------------
     def write(self, brief, tender_data: dict, run_dt) -> tuple:
@@ -338,17 +359,29 @@ def render_markdown(brief, heading: str = "") -> str:
                   ["- _No tender documents; assessed on the tender summary alone._"])
         lines += [f"- ⚠️ {w}" for w in docs.warnings]
 
+    details = getattr(brief, "details", None) or {}
+
     for section, label, kind, _src in tpl.section_rows():
         if section:
             lines += ["", f"## {section}", ""]
-            if section == SECTION_3_HEADING:
+            if section == tpl.HEADING_3_FIT:
+                # The matrix is a table in the sheet, so it renders as one here —
+                # its two columns are two different questions and collapsing them
+                # into a sentence loses which answer is the tender's and which is
+                # Onepoint's.
+                lines += ["| Domain | Required capability | Onepoint evidence | Rating |",
+                          "| --- | --- | --- | --- |"]
                 for d in brief.fit_dimensions:
-                    lines.append(f"- **{d['dimension']}** — {d['rating']}: {d['assessment']}")
+                    lines.append(
+                        f"| {d['dimension']} | {d.get('required','')} | "
+                        f"{d.get('evidence','')} | {d.get('rating','')} |"
+                    )
                 if not brief.fit_dimensions:
-                    lines.append("_No fit dimensions produced._")
+                    lines.append("| _No fit assessment produced._ | | | |")
             continue
         if not label:
             continue
         value = brief.fields.get(label, "")
-        lines.append(f"- **{label}:** {value}")
+        more = details.get(label, "")
+        lines.append(f"- **{label}:** {value}" + (f"  _({more})_" if more else ""))
     return "\n".join(lines) + "\n"

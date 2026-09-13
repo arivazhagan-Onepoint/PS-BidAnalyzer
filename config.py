@@ -27,6 +27,18 @@ SHEET_NAME       = _project["google_sheets"]["sheet_name"]
 NOBIDS_SHEET_NAME = _project["google_sheets"].get("nobids_tab_name", "PS NoBids")
 BIDS_SHEET_NAME   = _project["google_sheets"].get("bids_tab_name", "PS Bids")
 
+# The reporting template every detailed-analysis brief is copied from, named
+# rather than keyed by file ID so the bid team can point the tool at a new
+# version of the template without a code change — which is how it moved from
+# Vn_1_0 to the current 88-row template. Resolved to a file ID at run time by
+# report_writer, inside the Drive folder configured as Reporting_Templates:
+# the lookup demands exactly one match and raises otherwise, because two
+# same-named templates would otherwise be picked between silently, and every
+# brief thereafter would be built from whichever one Drive happened to list first.
+REPORTING_TEMPLATE_NAME = _project["google_sheets"].get(
+    "Reporting_Template", "Bid Analyser Reporting Template"
+)
+
 # Email notifications (SMTP). Non-secret settings live in the "notifications"
 # block of project_config.json; optional SMTP credentials (for relays that
 # require auth) live in the gitignored credentials/smtp_credentials.json.

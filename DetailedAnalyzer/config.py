@@ -22,6 +22,7 @@ from config import (  # explicit for linters
     BASE_DIR as PROJECT_ROOT,
     CREDENTIALS_DIR,
     UK_TIMEZONE,
+    REPORTING_TEMPLATE_NAME,
     drive_location,
 )
 
@@ -50,7 +51,16 @@ DETAIL_MODEL       = GEMINI_MODEL
 DETAIL_TEMPERATURE = 0.2
 # Far larger than the analyzer's 700: that call returns a score plus 2-4
 # sentences, this one returns a multi-section written assessment.
-DETAIL_MAX_TOKENS  = 4000
+#
+# Raised from 4000 to 8000 when the brief moved to the 88-row template
+# (2026-09-13). That template asks for 42 written answers instead of 29, and its
+# fit matrix wants two answers plus a rating for each of nine fixed domains
+# rather than one line per dimension — roughly half as much output again, before
+# counting the JSON keys, which are themselves whole questions. A reply that runs
+# out of budget comes back finish_reason=MAX_TOKENS, which this module treats as
+# a hard failure and retries, so an under-set budget costs three API calls and
+# then yields a TBD rather than a short brief.
+DETAIL_MAX_TOKENS  = 8000
 
 # Gemini 3.x draw reasoning tokens from the same max_output_tokens budget, so
 # with thinking on the budget can be consumed before any JSON is emitted
@@ -497,7 +507,14 @@ ALREADY_DETAILED_FIELD = None
 # the template itself is never written to, each report is separately shareable
 # with whoever owns that bid, and nothing in this code has to invent tabs inside
 # a sheet whose structure is maintained by hand.
-TEMPLATE_SPREADSHEET_ID = "1ImvX_fN7UHfgLFXV1to5V2pTZrGSJStPw3rHnBn6FLA"
+#
+# The template is identified by NAME, not by file ID — project_config.json's
+# google_sheets.Reporting_Template, re-exported here, resolved against the Drive
+# folder below. The ID was hardcoded until 2026-09-13 and pinned the brief to
+# Vn_1_0; naming it means a new version of the template is a config edit, which
+# is how this is actually maintained (the folder holds several versions side by
+# side). report_writer resolves it once per run and caches the ID.
+REPORTING_TEMPLATES_FOLDER_ID = drive_location("Reporting_Templates")
 TEMPLATE_TAB_NAME = "Detailed Analysis Template"
 # Where every report is published. Set in project_config.json under
 # google_drive_locations.Analysis_Reports, so each environment can publish to its
@@ -549,9 +566,15 @@ RENAME_REPORT_TAB = False
 # references. Both bite immediately — tender titles are full of hyphens, and so is
 # REPORT_RUNTIME_FORMAT's own '%Y%m%d-%H%M%S'.
 
-# Column A / B of the template — the label column and the column filled in.
+# Columns A / B / C of the template — the label column and the two answer
+# columns the sheet's own header row names ("Section", "Detail", "More Details").
+# C is written only for the rows whose header asks a second question: a
+# milestone's real-time status, and a fit-matrix domain's Onepoint evidence.
+# Every other row leaves C untouched rather than writing a blank into it, so a
+# note somebody has typed there by hand survives a re-run.
 TEMPLATE_LABEL_COL = "A"
 TEMPLATE_DETAIL_COL = "B"
+TEMPLATE_MORE_COL = "C"
 
 # Master switch for creating reports in Drive. Unlike WRITE_BACK_ENABLED below
 # this ships TRUE: the report IS the deliverable, it is written to a folder set

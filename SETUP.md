@@ -118,15 +118,18 @@ Edit `project_config.json`:
 | `sheet_name` | Exact name of the target Google Sheet **and** its tab |
 | `nobids_tab_name` | Tab collecting `NoBid(Human)` rows (default `PS NoBids`) — only used by the maintenance flow |
 | `bids_tab_name` | Tab collecting `Bid(Human)` rows (default `PS Bids`) — only used by the maintenance flow |
+| `Reporting_Template` | Exact name of the reporting template every brief is copied from — only used by the DetailedAnalyzer stage. Resolved by name inside `Reporting_Templates` below, so moving to a new version of the template is a config edit rather than a code change |
 | `google_drive_locations.Source_Docs` | Folder holding Onepoint's own evidence sheets, ingested into the corpus — only used by the DetailedAnalyzer stage |
 | `google_drive_locations.Tender_Docs` | Folder holding one `<OCID>-<Tender Title>` subfolder of buyer documents per tender — only used by the DetailedAnalyzer stage |
 | `google_drive_locations.Analysis_Reports` | Folder every brief is published into, one report file per tender — only used by the DetailedAnalyzer stage |
+| `google_drive_locations.Reporting_Templates` | Folder holding the reporting template(s). The name in `Reporting_Template` must match exactly **one** spreadsheet here — the lookup refuses to choose between duplicates |
 
-All three Drive folders must be shared with the service account — Viewer is
-enough for the two it reads, but the reports folder needs **Contributor/Editor**,
-since the briefs are created there.
+All four Drive folders must be shared with the service account — Viewer is
+enough for the three it reads (including the templates folder, which is only
+ever copied from), but the reports folder needs **Contributor/Editor**, since the
+briefs are created there.
 
-There is **no default** for any of the three: the DetailedAnalyzer refuses to
+There is **no default** for any of the four: the DetailedAnalyzer refuses to
 import without them, rather than reading the wrong folder and reporting an empty
 result as "no documents found", or publishing briefs somewhere nobody is looking.
 The analyzer stage never touches them, so it runs whether or not the block is
