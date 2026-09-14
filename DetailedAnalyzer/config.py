@@ -52,15 +52,18 @@ DETAIL_TEMPERATURE = 0.2
 # Far larger than the analyzer's 700: that call returns a score plus 2-4
 # sentences, this one returns a multi-section written assessment.
 #
-# Raised from 4000 to 8000 when the brief moved to the 88-row template
-# (2026-09-13). That template asks for 42 written answers instead of 29, and its
-# fit matrix wants two answers plus a rating for each of nine fixed domains
-# rather than one line per dimension — roughly half as much output again, before
-# counting the JSON keys, which are themselves whole questions. A reply that runs
-# out of budget comes back finish_reason=MAX_TOKENS, which this module treats as
-# a hard failure and retries, so an under-set budget costs three API calls and
-# then yields a TBD rather than a short brief.
-DETAIL_MAX_TOKENS  = 8000
+# Raised 4000 -> 8000 -> 16000 as the template grew (60 rows, then 88, then
+# 114). The current template asks ~65 written answers, several of them whole
+# assessments in their own right (competitive position, commercial, strategic
+# alignment, social value, next actions), plus three tables wanting two columns
+# each. A reply that runs out of budget comes back finish_reason=MAX_TOKENS,
+# which this module treats as a hard failure and retries, so an under-set budget
+# costs three API calls and then yields a TBD rather than a short brief — which
+# is why this is set with headroom rather than trimmed to a measured fit.
+#
+# Since the template now drives the question list, this is the setting to check
+# FIRST if briefs start coming back as TBD after someone adds a section.
+DETAIL_MAX_TOKENS  = 16000
 
 # Gemini 3.x draw reasoning tokens from the same max_output_tokens budget, so
 # with thinking on the budget can be consumed before any JSON is emitted
@@ -572,7 +575,7 @@ RENAME_REPORT_TAB = False
 # milestone's real-time status, and a fit-matrix domain's Onepoint evidence.
 # Every other row leaves C untouched rather than writing a blank into it, so a
 # note somebody has typed there by hand survives a re-run.
-TEMPLATE_LABEL_COL = "A"
+# Column A is the label column, read by template_reader rather than named here.
 TEMPLATE_DETAIL_COL = "B"
 TEMPLATE_MORE_COL = "C"
 

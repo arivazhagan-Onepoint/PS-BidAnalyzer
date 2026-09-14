@@ -236,9 +236,10 @@ workflow status has to be what advances it.
    report, the email and the log entries only.
 2. **`TENDER_DOCS_MANIFEST_FIELD` is `None`.** Add a `Documents Reviewed` row to
    the reporting template to have each brief carry its evidence base.
-3. **`DETAIL_MAX_TOKENS` is 8000** — raised from 4000 when the brief moved to
-   the 88-row template, which asks 42 written answers plus a nine-domain matrix.
-   A truncated reply shows as `finish_reason=MAX_TOKENS`.
+3. **`DETAIL_MAX_TOKENS` is 16000** — raised as the template grew (60 rows, then
+   88, then 114). Check this FIRST if briefs start coming back as TBD after
+   someone adds a section: a truncated reply shows as `finish_reason=MAX_TOKENS`,
+   which costs three retries and then yields a TBD.
 4. **`main()` emails on `--dry-run` too.** Call `run()` directly to test without
    mailing anyone.
 

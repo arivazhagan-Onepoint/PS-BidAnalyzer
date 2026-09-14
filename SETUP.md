@@ -118,7 +118,7 @@ Edit `project_config.json`:
 | `sheet_name` | Exact name of the target Google Sheet **and** its tab |
 | `nobids_tab_name` | Tab collecting `NoBid(Human)` rows (default `PS NoBids`) — only used by the maintenance flow |
 | `bids_tab_name` | Tab collecting `Bid(Human)` rows (default `PS Bids`) — only used by the maintenance flow |
-| `Reporting_Template` | Exact name of the reporting template every brief is copied from — only used by the DetailedAnalyzer stage. Resolved by name inside `Reporting_Templates` below, so moving to a new version of the template is a config edit rather than a code change |
+| `Reporting_Template` | Exact name of the reporting template every brief is copied from — only used by the DetailedAnalyzer stage. Resolved by name inside `Reporting_Templates` below, so moving to a new version of the template is a config edit rather than a code change. Its **structure is read at run time**: sections, tables and the yellow instruction cells all come from the live document, so adding a section or rewording an instruction needs no code change (see `DetailedAnalyzer/template_reader.py`) |
 | `google_drive_locations.Source_Docs` | Folder holding Onepoint's own evidence sheets, ingested into the corpus — only used by the DetailedAnalyzer stage |
 | `google_drive_locations.Tender_Docs` | Folder holding one `<OCID>-<Tender Title>` subfolder of buyer documents per tender — only used by the DetailedAnalyzer stage |
 | `google_drive_locations.Analysis_Reports` | Folder every brief is published into, one report file per tender — only used by the DetailedAnalyzer stage |

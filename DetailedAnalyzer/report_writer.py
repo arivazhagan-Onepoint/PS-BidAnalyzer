@@ -2,31 +2,35 @@
 Report writer — one completed brief per tender, as a copy of the template.
 
 Copies the Bid Analyser reporting template into the reports folder, renames it
-after the tender, and fills columns B and C against the labels already in
-column A.
-
-The template is found by NAME (project_config.json's
-google_sheets.Reporting_Template) inside the Reporting_Templates folder, not by a
-hardcoded file ID. The folder holds several versions side by side, so the ID a
-brief is built from is a thing the bid team changes, and a config edit is the
-right size of change for it. The lookup insists on exactly one match: two
-same-named templates would otherwise be chosen between by Drive's listing order,
-and every brief afterwards would be built from whichever it happened to return
-first — a difference nobody would see in the output.
+after the tender, and fills it in.
 
 Why copy rather than build a sheet from scratch: the template carries formatting,
 column widths and section styling that someone deliberately set up, and it is the
 artifact the bid team recognises. Reproducing that in code would drift from it the
 first time anyone adjusts the original. Copying inherits it for free.
 
-Why the labels are read back from the copy rather than assumed: the template is
-a live document. If someone inserts a row, appends a Section 6 or rewords a
-question, this writer follows it — values are matched to the labels actually
-present, and anything it cannot place is reported rather than written to the wrong
-row. A brief silently one row out of alignment is worse than one with a gap.
+**Values are addressed by ROW NUMBER, not by matching labels.** The structure was
+read from this very template (``template_reader``) and the report is a copy of
+it, so row N in the brief is row N in the report. That removes the whole business
+of normalising labels, prefix-matching them and refusing ambiguous ones — along
+with the failure it existed to prevent, a brief one row out of alignment.
+
+Two things the copy needs beyond filling:
+
+  * **The template is a worked example.** It ships with a previous tender's
+    answers in column B. Any row this writer does not fill would keep them, so
+    the brief would show another tender's figures as if they were this one's.
+    Every data row that gets no value is therefore cleared. Safe to do, because
+    each run creates a fresh timestamped copy — nothing is ever re-filled.
+  * **Some tables are placeholders.** A table whose yellow instruction says to
+    expand it ships two example rows; a real tender has as many as it has. Rows
+    are inserted before anything is written, so everything below shifts once and
+    the row numbers used for writing account for it.
+
+Structural rows — section headings, table headers, the sheet's own header — are
+never written to and never cleared.
 """
 import logging
-import re
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -35,8 +39,6 @@ from googleapiclient.errors import HttpError
 from .config import (
     SCOPES,
     SERVICE_ACCOUNT_FILE,
-    REPORTING_TEMPLATE_NAME,
-    REPORTING_TEMPLATES_FOLDER_ID,
     REPORTS_FOLDER_ID,
     REPORT_NAME_PATTERN,
     REPORT_RUNTIME_FORMAT,
@@ -45,57 +47,12 @@ from .config import (
     REPORT_NAME_NO_ID,
     REPORT_NAME_UNSAFE_CHARS,
     RENAME_REPORT_TAB,
-    TEMPLATE_LABEL_COL,
     TEMPLATE_DETAIL_COL,
     TEMPLATE_MORE_COL,
 )
-from . import template as tpl
+from . import template_reader as tr
 
 logger = logging.getLogger(__name__)
-
-
-def _normalise(label: str) -> str:
-    """Loose key for matching a value to a template row.
-
-    Whitespace, case and trailing punctuation vary between the template and the
-    labels transcribed in template.py, and a human editing the sheet will not
-    preserve them. Matching on a normalised form keeps a reworded space or a
-    stray colon from silently dropping a row.
-    """
-    return re.sub(r"[^a-z0-9]+", " ", (label or "").lower()).strip()
-
-
-def _first_line(label: str) -> str:
-    """Normalised key for just the first line of a template row.
-
-    Several rows in this template are a field name followed by guidance on
-    continuation lines — "Summary" then "< please provide a summary of
-    Route-To-Market… >", "Likelihood of Winning" then all four band definitions,
-    each flag row then the bullets describing what to list. Normalising the whole
-    cell buries the field name in the guidance, and the prefix match below
-    refuses short keys, so "Summary" matched nothing at all. Keying on the first
-    line as well finds these without loosening the prefix rule for everything.
-    """
-    return _normalise((label or "").replace("\r", "\n").split("\n")[0])
-
-
-# A label must be at least this long before a prefix match is trusted. Short keys
-# like "location" would prefix-match half a dozen unrelated rows; a long one that
-# matches from the first character is the field, followed by its guidance text.
-_PREFIX_MATCH_MIN_LEN = 12
-
-
-def _prefix_match(key: str, by_label: dict):
-    """Row whose label starts with ``key``, when there is exactly one.
-
-    Ambiguity is refused rather than guessed: writing a value to the wrong row
-    produces a brief that looks complete and states something false, which is
-    worse than the gap plus the warning the caller logs.
-    """
-    if len(key) < _PREFIX_MATCH_MIN_LEN:
-        return None
-    hits = [row for label, row in by_label.items() if label.startswith(key)]
-    return hits[0] if len(hits) == 1 else None
 
 
 def _sanitise(value: str) -> str:
@@ -141,51 +98,10 @@ class ReportWriter:
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
         self.sheets = build("sheets", "v4", credentials=creds)
         self.drive = build("drive", "v3", credentials=creds)
-        self._template_id = None
 
-    # --- resolve --------------------------------------------------------------
     def template_id(self) -> str:
-        """The configured reporting template's file ID, looked up once per run.
-
-        Resolved lazily rather than at import so that nothing which merely imports
-        this module pays for a Drive call, and cached on the instance so a run
-        analysing forty tenders still only asks once.
-        """
-        if self._template_id:
-            return self._template_id
-
-        query = (
-            f"name='{REPORTING_TEMPLATE_NAME}' and "
-            f"'{REPORTING_TEMPLATES_FOLDER_ID}' in parents and "
-            f"mimeType='application/vnd.google-apps.spreadsheet' and trashed=false"
-        )
-        files = self.drive.files().list(
-            q=query, spaces="drive", fields="files(id,name)", pageSize=10,
-            supportsAllDrives=True, includeItemsFromAllDrives=True,
-        ).execute().get("files", [])
-
-        if not files:
-            raise FileNotFoundError(
-                f"Reporting template {REPORTING_TEMPLATE_NAME!r} was not found in "
-                f"Drive folder {REPORTING_TEMPLATES_FOLDER_ID}. Check "
-                f"google_sheets.Reporting_Template in project_config.json matches "
-                f"the file name exactly, and that the service account can see the "
-                f"folder."
-            )
-        if len(files) > 1:
-            raise RuntimeError(
-                f"{len(files)} spreadsheets in folder {REPORTING_TEMPLATES_FOLDER_ID} "
-                f"are named {REPORTING_TEMPLATE_NAME!r} ({', '.join(f['id'] for f in files)}). "
-                f"Rename or remove all but one — picking between them would make "
-                f"every brief depend on Drive's listing order."
-            )
-
-        self._template_id = files[0]["id"]
-        logger.info(
-            f"Reporting template {REPORTING_TEMPLATE_NAME!r} resolved to "
-            f"{self._template_id}"
-        )
-        return self._template_id
+        """The configured template's file ID (resolved and cached in one place)."""
+        return tr.template_id(self.drive)
 
     # --- copy -----------------------------------------------------------------
     def create_report(self, tender_data: dict, run_dt) -> tuple:
@@ -232,93 +148,125 @@ class ReportWriter:
         ).execute()
         return new_title
 
+    def _expand_tables(self, file_id: str, tab_id: int, brief) -> list:
+        """Insert room for generated table rows. Returns [(after_row, count)].
+
+        Done before anything is written so that every row number used afterwards
+        can be shifted once, consistently. Rows inherit the formatting of the row
+        above so an expanded table still looks like the table it belongs to.
+        """
+        inserts, requests = [], []
+        for header_row, rows in sorted(brief.generated_rows.items()):
+            table = brief.template.table_by_header_row.get(header_row)
+            if table is None:
+                continue
+            available = len(table.rows)
+            extra = len(rows) - available
+            if extra <= 0:
+                continue
+            last = table.rows[-1].number
+            inserts.append((last, extra))
+            requests.append({
+                "insertDimension": {
+                    "range": {
+                        "sheetId": tab_id,
+                        "dimension": "ROWS",
+                        "startIndex": last,          # 0-based: directly after `last`
+                        "endIndex": last + extra,
+                    },
+                    "inheritFromBefore": True,
+                }
+            })
+
+        if requests:
+            self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=file_id, body={"requests": requests},
+            ).execute()
+            logger.info(
+                f"Expanded {len(requests)} table(s) by "
+                f"{sum(c for _, c in inserts)} row(s)"
+            )
+        return inserts
+
+    @staticmethod
+    def _shifter(inserts: list):
+        """Map a template row number onto its row in the expanded copy."""
+        def shift(n: int) -> int:
+            return n + sum(c for at, c in inserts if n > at)
+        return shift
+
     def fill_report(self, file_id: str, brief, report_title: str = "") -> dict:
         """Write the brief into the copied report. Returns a small stats dict.
 
         ``report_title`` is only used when RENAME_REPORT_TAB is on. Named to avoid
         shadowing the module-level report_name() in this scope.
         """
+        model = brief.template
+        if model is None:
+            raise ValueError(
+                "brief has no template structure attached; it cannot be written "
+                "without knowing which row each value belongs to"
+            )
+
         props = self._first_tab(file_id)
         tab_id, tab_name = props["sheetId"], props["title"]
 
         if RENAME_REPORT_TAB and report_title:
             tab_name = self._rename_tab(file_id, tab_id, report_title)
 
-        # Read column A of the copy — the labels as they actually are, not as
-        # template.py remembers them.
-        labels_res = self.sheets.spreadsheets().values().get(
-            spreadsheetId=file_id,
-            range=f"'{tab_name}'!{TEMPLATE_LABEL_COL}:{TEMPLATE_LABEL_COL}",
-        ).execute()
-        col_a = [(r[0] if r else "") for r in labels_res.get("values", [])]
+        inserts = self._expand_tables(file_id, tab_id, brief)
+        shift = self._shifter(inserts)
 
-        by_label, by_first_line = {}, {}
-        for i, label in enumerate(col_a, start=1):
-            key = _normalise(label)
-            if key and key not in by_label:
-                by_label[key] = i
-            head = _first_line(label)
-            if head and head not in by_first_line:
-                by_first_line[head] = i
+        data = []
 
-        def find_row(field_label: str):
-            """The report row a field belongs in, or None.
+        def put(row: int, col: str, value):
+            data.append({"range": f"'{tab_name}'!{col}{row}", "values": [[value]]})
 
-            Tried in order of how much is being assumed: the label exactly, the
-            label the template.py alias says the sheet uses, the row's first line,
-            then a unique prefix. Each step is looser than the last, which is why
-            they are not collapsed — an exact hit should never be overridden by a
-            fuzzy one.
-            """
-            for candidate in (field_label, tpl.sheet_label(field_label)):
-                key = _normalise(candidate)
-                if key in by_label:
-                    return by_label[key]
-                if key in by_first_line:
-                    return by_first_line[key]
-            # Fall back to a prefix match. Some template rows carry guidance
-            # after the field name — "Likelihood of Winning" is followed by all
-            # four band definitions on continuation lines — so an exact match
-            # misses them. Without this the most important row in the brief
-            # (the likelihood itself) silently stayed empty.
-            return _prefix_match(_normalise(field_label), by_label)
-
-        data, written, unmatched = [], 0, []
-        for label, value in brief.fields.items():
-            row = find_row(label)
-            if not row:
-                unmatched.append(label)
-                continue
-            data.append({
-                "range": f"'{tab_name}'!{TEMPLATE_DETAIL_COL}{row}",
-                "values": [[value]],
-            })
+        written = more_written = 0
+        for row_number, value in brief.values.items():
+            put(shift(row_number), TEMPLATE_DETAIL_COL, value)
             written += 1
-
-        # Column C, for the rows whose header asks a second question. Sparse by
-        # design: a row absent from brief.details is skipped rather than cleared,
-        # so nothing this tool writes wipes a note somebody typed there.
-        more_written = 0
-        for label, value in (brief.details or {}).items():
-            row = find_row(label)
-            if not row:
-                if label not in unmatched:
-                    unmatched.append(label)
-                continue
-            data.append({
-                "range": f"'{tab_name}'!{TEMPLATE_MORE_COL}{row}",
-                "values": [[value]],
-            })
+        for row_number, value in brief.more.items():
+            put(shift(row_number), TEMPLATE_MORE_COL, value)
             more_written += 1
 
-        if unmatched:
-            # Not fatal, but it means the template and template.py have diverged —
-            # surface it rather than quietly shipping an incomplete brief.
-            logger.warning(
-                f"{len(unmatched)} field(s) had no matching row in the report and "
-                f"were not written: {unmatched[:4]}"
-                f"{'…' if len(unmatched) > 4 else ''}"
-            )
+        # Generated tables: column A is produced too, since the template's own
+        # "Deliverable 1" / "Deliverable 2" are placeholders for a real list.
+        generated = 0
+        for header_row, rows in brief.generated_rows.items():
+            table = model.table_by_header_row.get(header_row)
+            if table is None:
+                continue
+            start = shift(table.rows[0].number)
+            for offset, cells in enumerate(rows):
+                data.append({
+                    "range": f"'{tab_name}'!A{start + offset}",
+                    "values": [cells],
+                })
+                generated += 1
+            # A table that came back shorter than its placeholders leaves empty
+            # rows behind; clear them rather than leaving "Deliverable 2" in a
+            # brief that only has one deliverable.
+            for offset in range(len(rows), len(table.rows)):
+                data.append({
+                    "range": (f"'{tab_name}'!A{start + offset}:"
+                              f"{TEMPLATE_MORE_COL}{start + offset}"),
+                    "values": [["", "", ""]],
+                })
+
+        # Clear the worked example. Any data row this brief has no value for would
+        # otherwise keep the previous tender's answer, which reads as this
+        # tender's — the one failure mode worse than a gap.
+        generated_rows = {r.number for t in model.tables if t.generated for r in t.rows}
+        cleared = 0
+        for row in model.rows:
+            if row.role not in (tr.ROLE_DATA, tr.ROLE_INSTRUCTION):
+                continue
+            if row.number in brief.values or row.number in generated_rows:
+                continue
+            put(shift(row.number), TEMPLATE_DETAIL_COL, "")
+            put(shift(row.number), TEMPLATE_MORE_COL, "")
+            cleared += 1
 
         if data:
             self.sheets.spreadsheets().values().batchUpdate(
@@ -327,12 +275,12 @@ class ReportWriter:
             ).execute()
 
         logger.info(
-            f"Filled report {file_id}: {written} field(s) in column "
-            f"{TEMPLATE_DETAIL_COL}, {more_written} in column {TEMPLATE_MORE_COL}"
+            f"Filled report {file_id}: {written} value(s) in column "
+            f"{TEMPLATE_DETAIL_COL}, {more_written} in column {TEMPLATE_MORE_COL}, "
+            f"{generated} generated row(s), {cleared} unused row(s) cleared"
         )
-        return {"fields_written": written, "unmatched": unmatched,
-                "details_written": more_written,
-                "dimensions_written": len(brief.fit_dimensions or [])}
+        return {"fields_written": written, "details_written": more_written,
+                "generated_written": generated, "cleared": cleared}
 
     # --- one call -------------------------------------------------------------
     def write(self, brief, tender_data: dict, run_dt) -> tuple:
@@ -359,29 +307,33 @@ def render_markdown(brief, heading: str = "") -> str:
                   ["- _No tender documents; assessed on the tender summary alone._"])
         lines += [f"- ⚠️ {w}" for w in docs.warnings]
 
-    details = getattr(brief, "details", None) or {}
+    model = brief.template
+    if model is None:
+        return "\n".join(lines) + "\n"
 
-    for section, label, kind, _src in tpl.section_rows():
-        if section:
-            lines += ["", f"## {section}", ""]
-            if section == tpl.HEADING_3_FIT:
-                # The matrix is a table in the sheet, so it renders as one here —
-                # its two columns are two different questions and collapsing them
-                # into a sentence loses which answer is the tender's and which is
-                # Onepoint's.
-                lines += ["| Domain | Required capability | Onepoint evidence | Rating |",
-                          "| --- | --- | --- | --- |"]
-                for d in brief.fit_dimensions:
-                    lines.append(
-                        f"| {d['dimension']} | {d.get('required','')} | "
-                        f"{d.get('evidence','')} | {d.get('rating','')} |"
-                    )
-                if not brief.fit_dimensions:
-                    lines.append("| _No fit assessment produced._ | | | |")
+    generated_rows = {r.number for t in model.tables if t.generated for r in t.rows}
+
+    for row in model.rows:
+        if row.role == tr.ROLE_SECTION:
+            lines += ["", f"## {row.label}", ""]
             continue
-        if not label:
+        if row.role == tr.ROLE_SUB_HEADING:
+            lines += ["", f"### {row.first_line}", ""]
             continue
-        value = brief.fields.get(label, "")
-        more = details.get(label, "")
-        lines.append(f"- **{label}:** {value}" + (f"  _({more})_" if more else ""))
+        if row.role == tr.ROLE_TABLE_HEADER:
+            table = model.table_by_header_row.get(row.number)
+            if table and table.generated:
+                for cells in brief.generated_rows.get(row.number, []):
+                    lines.append(f"- **{cells[0]}** — {' | '.join(cells[1:])}")
+            continue
+        if row.number in generated_rows:
+            continue
+
+        value = brief.values.get(row.number)
+        if value is None:
+            continue
+        extra = brief.more.get(row.number, "")
+        label = row.first_line or f"row {row.number}"
+        lines.append(f"- **{label}:** {value}" + (f"  _({extra})_" if extra else ""))
+
     return "\n".join(lines) + "\n"

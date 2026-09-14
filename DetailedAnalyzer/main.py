@@ -324,7 +324,7 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
         summary[family] = summary.get(family, 0) + 1
         logger.info(
             f"  → {brief.likelihood_summary}, implies {family}; "
-            f"{len(brief.fit_dimensions)} fit dimension(s); "
+            f"{brief.answered} row(s) answered; "
             f"{len(brief.documents.used)} document(s) in evidence"
         )
 

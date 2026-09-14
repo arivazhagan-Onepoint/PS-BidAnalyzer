@@ -3,29 +3,34 @@ Core detailed analysis — fills the Bid Analyser reporting template.
 
 Second stage to ``analyzer.analyze_tender``. That call answers one question with
 one number: should Onepoint bid at all. This one takes a tender that already
-cleared that gate and completes the reporting template
-(``DetailedAnalyzer/template.py``) — sixty-odd rows across the template's own
-sections, ending in a Likelihood of Winning percentage and a recommendation.
+cleared that gate and completes the reporting template, ending in a Likelihood of
+Winning percentage and a recommendation.
+
+**The template drives this module, not the other way round.** Its structure is
+read from the published document at run time (``template_reader``), so the
+questions asked of the model are whatever the sheet currently asks — including
+its YELLOW instruction cells, whose prose is handed to the model verbatim as the
+instruction for that row. Add a section to the template and the next run fills
+it; reword a yellow cell and the next run obeys the new wording. Nothing here
+has a list of questions in it.
 
 Division of labour, and the reason for it:
 
-  * The 16 deterministic fields (submission deadline, client name, reference,
-    location, portal, time remaining, urgency…) are filled from the tracker row
-    and the clock, never by the model. A hallucinated submission deadline is the
-    most expensive error this tool could make, and there is no reason to risk it
-    on data already in hand.
-  * The 42 derived fields are asked of the model as one JSON object, so a partial
-    reply fails loudly on parse rather than half-filling a brief a human will
-    read as complete.
-  * Four of those derived fields are milestone DATES that exist only inside the
-    buyer's documents (clarifications response, presentations, evaluation
-    completion, contract commencement). They are asked for under a stricter
-    instruction than the prose fields: a date the documents state, or the words
+  * Rows the tracker or the clock already answers are filled in code, never by
+    the model — see ``template.DETERMINISTIC``. A hallucinated submission
+    deadline is the most expensive error this tool could make, and there is no
+    reason to risk it on data already in hand.
+  * Everything else is asked of the model as one JSON object keyed by ROW
+    NUMBER, so a partial reply fails loudly on parse rather than half-filling a
+    brief a human will read as complete. Row numbers also mean the answer's
+    destination is exact: the report is a copy of the template that was read, so
+    row N here is row N there.
+  * Milestone dates the tracker does not hold are asked under a stricter
+    instruction than the prose rows: a date the documents state, or the words
     "Not stated in the tender documents", never a plausible guess.
-  * The fit matrix is nine FIXED domains, the same for every tender so that two
-    briefs can be compared. Each domain answers twice — what the tender requires,
-    and what Onepoint can evidence — which is why the template gives it two
-    columns and why ``details`` exists alongside ``fields``.
+  * A table whose instruction says to EXPAND it is generated rather than filled
+    — the template ships "Deliverable 1" and "Deliverable 2" as placeholders,
+    and a real tender has as many deliverables as it has.
 
 Public API:
     analyse_tender_detail(tender_data, run_date=None) -> TenderBrief
@@ -54,6 +59,7 @@ from .onepoint_context import load_onepoint_context
 from .sources import load_corpus
 from .tender_docs import load_tender_documents, TenderDocuments
 from . import template as tpl
+from . import template_reader as tr
 
 logger = logging.getLogger(__name__)
 
@@ -62,28 +68,30 @@ logger = logging.getLogger(__name__)
 class TenderBrief:
     """A completed reporting template for one tender.
 
-    ``fields`` is keyed by the template's own verbatim row labels, holding both
-    the deterministic and the derived answers, so the renderer can walk the
-    template in order and never has to guess where a value came from.
+    Keyed by ROW NUMBER rather than by label, because the report is a copy of the
+    very template these numbers were read from — so there is nothing to match and
+    nothing to mis-match. ``values`` is column B, ``more`` column C.
 
-    ``details`` is the same idea for the template's third column, and is
-    deliberately sparse: only the rows whose header asks a second question appear
-    in it (a milestone's real-time status, a fit domain's Onepoint evidence).
-    Absent means "leave column C alone", not "write a blank".
+    ``more`` is deliberately sparse: only rows whose table header asks a second
+    question appear in it. ``generated_rows`` carries the tables the template
+    asked to have expanded, keyed by their header row.
     """
-    fields: dict                      # {template row label: column B text}
-    details: dict                     # {template row label: column C text}
-    fit_dimensions: list              # Fit matrix: [{"dimension","required","evidence","rating"}]
-    likelihood_pct: float             # 0-100
-    likelihood_band: str              # VERY HIGH / HIGH / MEDIUM / LOW
-    recommendation: str
-    analysis_date: str
+    values: dict = field(default_factory=dict)        # {row number: column B}
+    more: dict = field(default_factory=dict)          # {row number: column C}
+    generated_rows: dict = field(default_factory=dict)  # {header row: [[A,B,C]…]}
+    likelihood_pct: float = 0.0
+    likelihood_band: str = "LOW"
+    recommendation: str = ""
+    analysis_date: str = ""
     raw: dict = field(default_factory=dict)
     analysis_failed: bool = False
     # The document pack this brief was built from. Carried on the result so the
     # run log, the email and the report can all state the evidence base — an
     # assessment whose sources are invisible cannot be checked.
     documents: TenderDocuments = field(default_factory=TenderDocuments)
+    # The template this brief was built against, so the writer and the renderer
+    # walk exactly the document that was read rather than re-reading it.
+    template: object = None
 
     @property
     def likelihood_summary(self) -> str:
@@ -96,6 +104,10 @@ class TenderBrief:
     def qualification_family(self) -> str:
         """Bid / TBD / NoBid implied by the likelihood band."""
         return tpl.LIKELIHOOD_QUALIFICATION.get(self.likelihood_band, "TBD")
+
+    @property
+    def answered(self) -> int:
+        return len(self.values)
 
 
 _SYSTEM_PROMPT = (
@@ -110,8 +122,8 @@ _SYSTEM_PROMPT = (
 )
 
 # Row fields offered to the prompt as context beyond title and description.
-# Deliberately excludes the fields template.py fills deterministically — the
-# model does not need to see a value it is not being asked to produce.
+# Deliberately excludes the fields filled deterministically — the model does not
+# need to see a value it is not being asked to produce.
 CONTEXT_FIELDS = (
     "Buyer Name",
     "Published On",
@@ -130,6 +142,11 @@ CONTEXT_FIELDS = (
     "PME_Flag",
 )
 
+# How many rows a generated table may grow to. A bound rather than a target: the
+# template ships two placeholder rows, and a tender with twenty deliverables
+# would otherwise push the rest of the brief down the sheet indefinitely.
+MAX_GENERATED_ROWS = 12
+
 
 def _format_tender_facts(tender_data: dict) -> str:
     """Render the CONTEXT_FIELDS present on this row as a label: value list.
@@ -146,22 +163,21 @@ def _format_tender_facts(tender_data: dict) -> str:
     return "\n".join(lines) if lines else "(No further structured fields on this row.)"
 
 
-def _timeline_block(deterministic: dict) -> str:
+def _timeline_block(computed: dict) -> str:
     """The computed timeline, stated to the model in words it cannot misread.
 
     Without this the model sees a due date and no notion of today, so it cannot
     tell a live tender from a closed one — the first run produced a brief reading
     "Deadline passed 22 days ago" beside "Proceed with bid", because the countdown
-    is computed after the call and was never shown to it. The template calls
-    Section 1 a critical gate; this is what makes it one.
+    is computed after the call and was never shown to it. The template calls the
+    timeline gate critical; this is what makes it one.
     """
     lines = [
-        f"Today's date: {deterministic.get('Current Date', 'unknown')}",
-        f"Time remaining: {deterministic.get('Time Remaining', 'unknown')}",
-        f"Urgency: {deterministic.get('Urgency Status', 'unknown')}",
+        f"Today's date: {computed.get('current date', 'unknown')}",
+        f"Time remaining: {computed.get('time remaining', 'unknown')}",
+        f"Urgency: {computed.get('urgency status', 'unknown')}",
     ]
-    expired = "deadline has passed" in deterministic.get("Urgency Status", "").lower()
-    if expired:
+    if "deadline has passed" in computed.get("urgency status", "").lower():
         lines.append(
             "THIS TENDER'S SUBMISSION DEADLINE HAS ALREADY PASSED. It cannot be "
             "bid. Say so plainly in the recommendation, and set the likelihood of "
@@ -173,10 +189,105 @@ def _timeline_block(deterministic: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_prompt(title: str, description: str, facts: str, context: str,
-                  corpus: str = "", timeline: str = "", pack: str = "",
-                  pack_absent_note: str = "") -> str:
-    """Assemble the prompt asking for every derived field in the template."""
+# --- what to ask -------------------------------------------------------------
+
+def _plan(model, filled_rows: set) -> tuple:
+    """Work out what the model must answer. Returns (asks, generated_tables).
+
+    ``asks`` is a list of (row, table) for every row still needing an answer;
+    ``generated_tables`` are the tables whose instruction said to expand them,
+    whose rows are produced rather than filled.
+    """
+    generated = [t for t in model.tables if t.generated]
+    generated_row_numbers = {r.number for t in generated for r in t.rows}
+
+    asks = []
+    for row in model.questions:
+        if row.number in filled_rows or row.number in generated_row_numbers:
+            continue
+        # The likelihood rows are written from the single percentage the model
+        # gives, not asked for individually — the template currently asks for the
+        # score twice, and two separately-worded answers could disagree.
+        if tpl.is_likelihood_row(row.label):
+            continue
+        asks.append((row, model.table_of(row.number)))
+    return asks, generated
+
+
+def _questions_block(asks: list, generated: list) -> str:
+    """Render the template's own questions, grouped the way the sheet groups them.
+
+    Walked in row order, generated tables included in their proper place — the
+    sheet's sequence is how a reader understands the brief, and a question asked
+    out of order invites an answer written for the wrong context.
+    """
+    entries = [(row.number, "ask", (row, table)) for row, table in asks]
+    entries += [(t.header.number, "table", t) for t in generated]
+    entries.sort(key=lambda e: e[0])
+
+    out, section, table_seen = [], None, set()
+
+    for _, kind, payload in entries:
+        if kind == "table":
+            table = payload
+            if table.header.section != section:
+                section = table.header.section
+                out.append(f"\n### {section}")
+            cols = table.columns
+            out.append(
+                f"t{table.header.number} -> a LIST you generate, "
+                f"{len(table.rows)}-{MAX_GENERATED_ROWS} items, each "
+                + '{"name": …, "detail": …'
+                + (', "more": …' if table.has_more_column else "") + "}"
+            )
+            out.append(
+                f"  name = {cols[0]!r}, detail = {cols[1]!r}"
+                + (f", more = {cols[2]!r}" if len(cols) >= 3 else "")
+            )
+            if table.preamble:
+                out.append(f"Instruction for this table:\n{table.preamble}")
+            continue
+
+        row, table = payload
+        if row.section != section:
+            section = row.section
+            out.append(f"\n### {section}")
+
+        if table is not None and table.header.number not in table_seen:
+            table_seen.add(table.header.number)
+            cols = table.columns
+            out.append(
+                f"\nTable — columns: B = {cols[1]!r}"
+                + (f", C = {cols[2]!r}" if len(cols) >= 3 else "")
+            )
+            if table.preamble:
+                out.append(f"Instruction for this table:\n{table.preamble}")
+
+        key = f"r{row.number}"
+        # Checked before the table branch: these rows sit inside the milestone
+        # table, whose third column this code computes. Asking for the pair would
+        # invite a countdown the model is in no position to work out.
+        if tpl.is_derived_date(row.label):
+            out.append(
+                f"{key} = {row.first_line!r}  -> a date as DD/MM/YYYY, or exactly "
+                f'"Not stated in the tender documents"'
+            )
+        elif table is not None and table.has_more_column:
+            out.append(f'{key} = {row.first_line!r}  -> {{"detail": …, "more": …}}')
+        elif row.role == tr.ROLE_INSTRUCTION:
+            # The yellow cell's own words, verbatim. This is the instruction the
+            # template author wrote for whoever fills the brief, and it is what
+            # the model is held to.
+            out.append(f"{key} ->\n{row.label}")
+        else:
+            out.append(f"{key} = {row.first_line!r}")
+
+    return "\n".join(out)
+
+
+def _build_prompt(model, asks, generated, title, description, facts, context,
+                  corpus="", timeline="", pack="", pack_absent_note="") -> str:
+    """Assemble the prompt asking for every row the template still needs."""
     context_block = context if context else "(No Onepoint capability context provided.)"
 
     corpus_block = ""
@@ -220,20 +331,8 @@ in it as evidence that the pack is silent on that point:
     elif pack_absent_note:
         pack_block = f"\n{pack_absent_note}\n"
 
-    # The derived field labels are emitted from template.py rather than retyped,
-    # so the prompt cannot drift out of step with the template it fills. The
-    # milestone dates are pulled out of that list and asked for separately: every
-    # other derived field wants prose, these want a date or an admission.
-    date_labels = set(tpl.derived_date_fields())
-    derived = [l for l in tpl.derived_fields() if l not in date_labels]
-    field_list = "\n".join(f'  "{label}": "<your answer>",' for label in derived)
-    date_list = "\n".join(f'  "{label}": "<DD/MM/YYYY, or the words below>",'
-                          for label in tpl.derived_date_fields())
-    domain_list = "\n".join(
-        f'    {{"dimension": "{d}", "required": "<what this tender demands>", '
-        f'"evidence": "<Onepoint evidence, or none>", "rating": "STRONG|PARTIAL|WEAK|NONE"}},'
-        for d in tpl.FIT_DOMAINS
-    )
+    keys = [f"r{row.number}" for row, _ in asks]
+    keys += [f"t{t.header.number}" for t in generated]
 
     return f"""Onepoint capability context (use ONLY this to judge capability):
 ---
@@ -250,48 +349,48 @@ Tender facts:
 Timeline (computed — authoritative, use this rather than inferring dates):
 {timeline}
 
-Complete Onepoint's bid qualification brief for this tender.
+You are completing Onepoint's bid qualification brief. Below is every question the
+brief currently asks, taken from the reporting template itself and grouped by its
+sections. Each is identified by a key like "r42".
 
-The fit assessment is a FIXED matrix of {len(tpl.FIT_DOMAINS)} domains — the same
-{len(tpl.FIT_DOMAINS)} for every tender, so briefs can be compared. Do not add,
-rename, drop or reorder them. Each domain takes two separate answers: "required"
-is what THIS tender demands of that domain, read from its requirements; "evidence"
-is what Onepoint can actually show for it, from the documented evidence above and
-nothing else. Where the tender asks nothing of a domain say so in "required"
-rather than inventing a requirement, and where Onepoint has nothing to show say
-that in "evidence" rather than softening it — the rating then follows: STRONG,
-PARTIAL, WEAK or NONE.
+Where a question is written as an instruction, that instruction is the template
+author's own wording — follow it exactly, including any sub-headings or bullet
+structure it asks for. "<in the Adjacent Column>" simply means the answer belongs
+in the cell beside it, which is where it will be written; it is not part of the
+question.
 
-The milestone dates ({', '.join(tpl.derived_date_fields())}) are NOT in
-Onepoint's tracker and must come from the buyer's own documents. Give each as
-DD/MM/YYYY only where the documents state it. Where they do not, answer exactly
-"Not stated in the tender documents". A plausible-looking date is worse than an
-admission here: the bid team will plan against whatever this brief says.
+Rules that apply throughout:
+- Judge capability ONLY from the documented evidence above. Where there is no
+  evidence, say "No documented evidence" rather than softening it.
+- Where the tender is silent, say "Not stated in the tender documents". For the
+  date questions this matters most: a plausible-looking date is worse than an
+  admission, because the bid team will plan against whatever this brief says.
+- Answers are cells in a spreadsheet. Keep them self-contained and readable; use
+  short newline-separated bullets where the instruction asks for a list.
+- Do not restate the question in the answer.
+- Where a question takes two parts, "detail" fills the first column and "more"
+  the second, named above for that table. Leave "more" as an empty string where
+  the second column genuinely adds nothing to that row.
 
-The three flag rows are a triage, so keep them distinct rather than repeating the
-same point in each. Green = strong alignment Onepoint can evidence. Amber = a gap
-that could be mitigated, and for each one say how (partnering, subcontracting,
-recruitment, accreditation). Red = a gap with no evidence behind it, a mandatory
-criterion that may fail, or anything that would visibly reduce buyer confidence.
+QUESTIONS
+{_questions_block(asks, generated)}
 
-For "Likelihood of Winning" give an integer percentage 0-100. Do not name the
-band — it is derived from your percentage. Calibrate honestly: a tender Onepoint
-can evidence against most requirements and has comparable past performance for
-sits high; one where key requirements are unevidenced sits low, however
-attractive the work looks.
+Also give "likelihood_pct": an integer 0-100 for Onepoint's likelihood of winning
+this bid. Do not name the band — it is derived from your percentage, and written
+into every row of the brief that asks for it. Calibrate honestly: a tender
+Onepoint can evidence against most requirements and has comparable past
+performance for sits high; one where key requirements are unevidenced sits low,
+however attractive the work looks.
 
-Respond with ONLY a JSON object, no markdown fence, no preamble, in exactly this
-shape. Every key must be present; use "Not stated in the tender" or "No
-documented evidence" rather than omitting one:
+Respond with ONLY a JSON object, no markdown fence, no preamble. Every key below
+must be present:
 {{
-{field_list}
-{date_list}
-  "Likelihood of Winning": <integer 0-100>,
-  "fit_assessment": [
-{domain_list}
-  ]
+{chr(10).join(f'  "{k}": …,' for k in keys)}
+  "likelihood_pct": <integer 0-100>
 }}"""
 
+
+# --- what the code fills ------------------------------------------------------
 
 def _has_money_figure(value: str) -> bool:
     """True when a money cell holds a real, non-zero amount.
@@ -315,57 +414,70 @@ def _has_money_figure(value: str) -> bool:
         return False
 
 
-def _deterministic_fields(tender_data: dict, run_dt: datetime) -> dict:
-    """Fill the template rows that come from the tracker row or the clock.
+def _deterministic_value(label: str, kind: str, src: str, tender_data: dict,
+                         run_dt: datetime) -> str:
+    """One row's answer, from the tracker row or the clock."""
+    if kind == tpl.COMPUTED:
+        deadline_raw = (tender_data.get("Tender Due Date", "") or "").strip()
+        if src == "run_date":
+            return run_dt.strftime("%d/%m/%Y")
+        if src == "time_remaining":
+            return _time_remaining(deadline_raw, run_dt)
+        if src == "urgency":
+            return _urgency(deadline_raw, run_dt)
+        return ""
 
-    Nothing here is a judgement, so nothing here goes near the model. Missing
-    source values render as an explicit marker rather than a blank cell: a brief
-    with an empty Submission Deadline reads as "no deadline", which is a very
-    different claim from "the tracker does not hold one".
+    key = tpl._key(label)
+    value = (tender_data.get(src, "") or "").strip()
+
+    # Location reads better as Locality + Country than either alone.
+    if key == tpl._key("Location"):
+        parts = [(tender_data.get(f, "") or "").strip()
+                 for f in ("Locality", "Country")]
+        value = ", ".join(p for p in parts if p)
+    # Fall back to the OCID when the tracker has no ID for the row.
+    elif key == tpl._key("Opportunity Reference") and not value:
+        value = (tender_data.get("OCID", "") or "").strip()
+    # Budget: prefer the total, fall back to the annual figure, and say which.
+    elif key == tpl._key("Budget (Max/Indicative)"):
+        total = (tender_data.get("Total Contract Value", "") or "").strip()
+        annual = (tender_data.get("Annual Contract Value", "") or "").strip()
+        if _has_money_figure(total):
+            value = f"{total} (total contract value)"
+        elif _has_money_figure(annual):
+            value = f"{annual} (annual contract value)"
+        else:
+            value = ""
+
+    return value or "Not recorded in the tracker"
+
+
+def _fill_deterministic(model, tender_data: dict, run_dt: datetime) -> tuple:
+    """Fill every row the tracker or the clock answers.
+
+    Returns (values, more, computed_by_label) — the last so the timeline block
+    can be stated to the model without re-deriving it.
     """
-    out, more = {}, {}
-    deadline_raw = (tender_data.get("Tender Due Date", "") or "").strip()
+    values, more, by_label = {}, {}, {}
 
-    for label, kind, src in tpl.deterministic_fields():
-        if kind == tpl.SHEET:
-            value = (tender_data.get(src, "") or "").strip()
-            # Location reads better as Locality + Country than either alone.
-            if label == "Location":
-                parts = [(tender_data.get(f, "") or "").strip()
-                         for f in ("Locality", "Country")]
-                value = ", ".join(p for p in parts if p)
-            # Fall back to OCID when the tracker has no ID for the row.
-            if label == "Opportunity Reference" and not value:
-                value = (tender_data.get("OCID", "") or "").strip()
-            # Budget: prefer total, fall back to annual, and say which.
-            if label == "Budget (Max/Indicative)":
-                total = (tender_data.get("Total Contract Value", "") or "").strip()
-                annual = (tender_data.get("Annual Contract Value", "") or "").strip()
-                if _has_money_figure(total):
-                    value = f"{total} (total contract value)"
-                elif _has_money_figure(annual):
-                    value = f"{annual} (annual contract value)"
-                else:
-                    value = ""
-            out[label] = value or "Not recorded in the tracker"
-            # The milestone table's third column asks for each date to be read
-            # against today. That is arithmetic, so it is done here for every
-            # date the tracker supplies; the ones only the pack holds get the
-            # same treatment in _to_brief, once the model has returned them.
-            if label in tpl.MILESTONE_DATES:
-                status = _milestone_status(value, run_dt)
-                if status:
-                    more[label] = status
+    for row in model.questions:
+        found = tpl.deterministic_for(row.label)
+        if not found:
+            continue
+        kind, src = found
+        text = _deterministic_value(row.label, kind, src, tender_data, run_dt)
+        values[row.number] = text
+        by_label[tpl._key(row.label)] = text
 
-        elif kind == tpl.COMPUTED:
-            if src == "run_date":
-                out[label] = run_dt.strftime("%d/%m/%Y")
-            elif src == "time_remaining":
-                out[label] = _time_remaining(deadline_raw, run_dt)
-            elif src == "urgency":
-                out[label] = _urgency(deadline_raw, run_dt)
+        # The milestone table's third column asks for each date to be read
+        # against today. That is arithmetic, so it is done here.
+        table = model.table_of(row.number)
+        if table is not None and table.has_more_column and tpl.is_milestone_date(row.label):
+            status = _milestone_status(text, run_dt)
+            if status:
+                more[row.number] = status
 
-    return out, more
+    return values, more, by_label
 
 
 def _parse_deadline(raw: str, run_dt: datetime):
@@ -450,30 +562,37 @@ def _urgency(deadline_raw: str, run_dt: datetime) -> str:
     return "AMPLE — more than a month"
 
 
-def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> TenderBrief:
+# --- the run ------------------------------------------------------------------
+
+def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
+                          model=None) -> TenderBrief:
     """Complete the reporting template for one tender row.
 
-    ``tender_data`` is the whole sheet row as {column: value} (Tender.data). The
-    caller always gets a deterministic result: an empty row, or an API failure
-    after every retry, returns a brief flagged ``analysis_failed`` rather than
-    raising, so one bad row cannot take down a run — main.py counts it as an
-    error, and a failed brief is never written as though it were an assessment.
+    ``tender_data`` is the whole sheet row as {column: value} (Tender.data).
+    ``model`` is the template structure; read and cached for the run when the
+    caller does not supply it. The caller always gets a deterministic result: an
+    empty row, or an API failure after every retry, returns a brief flagged
+    ``analysis_failed`` rather than raising, so one bad row cannot take down a
+    run — main.py counts it as an error, and a failed brief is never written as
+    though it were an assessment.
     """
     if run_date is None:
         run_date = datetime.now(UK_TIMEZONE)
+    if model is None:
+        model = tr.load_template_model()
     date_str = run_date.strftime("%Y-%m-%d")
 
     title = (tender_data.get("Name", "") or "").strip()
     description = (tender_data.get("Tender Description", "") or "").strip()
 
-    deterministic, det_more = _deterministic_fields(tender_data, run_date)
+    det_values, det_more, computed = _fill_deterministic(model, tender_data, run_date)
 
     if not title and not description:
         return TenderBrief(
-            fields=deterministic, details=det_more, fit_dimensions=[], likelihood_pct=0.0,
+            values=det_values, more=det_more, likelihood_pct=0.0,
             likelihood_band="LOW",
             recommendation="No tender title or description available to analyse.",
-            analysis_date=date_str, analysis_failed=True,
+            analysis_date=date_str, analysis_failed=True, template=model,
         )
 
     context = load_onepoint_context()
@@ -490,9 +609,18 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
         "terms) rather than inferring an answer."
     )
 
-    prompt = _build_prompt(title, description, _format_tender_facts(tender_data),
-                           context, corpus, _timeline_block(deterministic),
-                           pack_docs.as_prompt_block(), pack_absent_note)
+    asks, generated = _plan(model, set(det_values))
+    logger.info(
+        f"  template asks {len(asks)} question(s) + "
+        f"{len(generated)} generated table(s); {len(det_values)} row(s) filled "
+        f"from the tracker"
+    )
+
+    prompt = _build_prompt(
+        model, asks, generated, title, description,
+        _format_tender_facts(tender_data), context, corpus,
+        _timeline_block(computed), pack_docs.as_prompt_block(), pack_absent_note,
+    )
 
     last_error = None
     for attempt in range(1, DETAIL_MAX_RETRIES + 1):
@@ -528,8 +656,8 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
                 )
 
             result = _parse_response(raw)
-            return _to_brief(result, deterministic, det_more, date_str,
-                             run_date, pack_docs)
+            return _to_brief(result, model, asks, generated, det_values, det_more,
+                             date_str, run_date, pack_docs)
 
         except Exception as e:
             last_error = e
@@ -546,7 +674,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
     )
     time.sleep(API_THROTTLE_SECONDS)
     return TenderBrief(
-        fields=deterministic, details=det_more, fit_dimensions=[], likelihood_pct=0.0,
+        values=det_values, more=det_more, likelihood_pct=0.0,
         likelihood_band="LOW",
         recommendation=(
             f"Detailed analysis could not be completed after {DETAIL_MAX_RETRIES} "
@@ -554,119 +682,126 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None) -> Tende
             f"judgement on the opportunity."
         ),
         analysis_date=date_str, analysis_failed=True, documents=pack_docs,
+        template=model,
     )
 
 
-def _to_brief(result: dict, deterministic: dict, det_more: dict, date_str: str,
-              run_dt: datetime, pack_docs: TenderDocuments = None) -> TenderBrief:
+def _to_brief(result: dict, model, asks, generated, det_values: dict,
+              det_more: dict, date_str: str, run_dt: datetime,
+              pack_docs: TenderDocuments = None) -> TenderBrief:
     """Assemble a TenderBrief from the model's reply plus the filled-in facts.
 
-    Every derived label the template expects is accounted for: a key the model
-    omitted becomes an explicit "not addressed" rather than a silently absent
-    row, because a brief with a quietly missing row reads as complete.
+    Every row the template asked about is accounted for: a key the model omitted
+    becomes an explicit "not addressed" rather than a silently absent row,
+    because a brief with a quietly missing row reads as complete.
     """
-    fields = dict(deterministic)
-    details = dict(det_more)
+    values, more = dict(det_values), dict(det_more)
     missing = []
-    for label in tpl.derived_fields():
-        value = result.get(label)
-        if value is None or not str(value).strip():
-            missing.append(label)
-            fields[label] = "Not addressed by the analysis."
-        else:
-            fields[label] = str(value).strip()
 
-    # The milestone dates the model read out of the pack get the same column C
-    # treatment the tracker's own dates got — one rule for every row in the
-    # table, whoever supplied the date.
-    for label in tpl.derived_date_fields():
-        status = _milestone_status(fields.get(label, ""), run_dt)
-        if status:
-            details[label] = status
+    for row, table in asks:
+        answer = result.get(f"r{row.number}")
+        detail, extra = "", ""
+
+        if isinstance(answer, dict):
+            detail = str(answer.get("detail", "") or "").strip()
+            extra = str(answer.get("more", "") or "").strip()
+        elif answer is not None:
+            detail = str(answer).strip()
+
+        if not detail:
+            missing.append(row.first_line or f"row {row.number}")
+            detail = "Not addressed by the analysis."
+
+        values[row.number] = detail
+        if extra:
+            more[row.number] = extra
+
+        # A milestone date the model supplied gets the same column C treatment
+        # the tracker's own dates got — one rule for every row in that table.
+        if table is not None and table.has_more_column and tpl.is_derived_date(row.label):
+            status = _milestone_status(detail, run_dt)
+            if status:
+                more[row.number] = status
 
     if missing:
         logger.warning(
-            f"{len(missing)} template field(s) missing from the model reply: "
+            f"{len(missing)} template row(s) missing from the model reply: "
             f"{missing[:4]}{'…' if len(missing) > 4 else ''}"
         )
 
+    # Generated tables — the ones whose instruction said to expand them.
+    generated_rows = {}
+    for table in generated:
+        items = result.get(f"t{table.header.number}") or []
+        rows = []
+        for item in items[:MAX_GENERATED_ROWS]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if not name:
+                continue
+            cells = [name, str(item.get("detail", "") or "").strip()]
+            if table.has_more_column:
+                cells.append(str(item.get("more", "") or "").strip())
+            rows.append(cells)
+        if rows:
+            generated_rows[table.header.number] = rows
+        else:
+            logger.warning(
+                f"Generated table at row {table.header.number} came back empty; "
+                f"its placeholder rows are left as the template has them"
+            )
+
     try:
-        pct = float(result.get("Likelihood of Winning", 0))
+        pct = float(result.get("likelihood_pct", 0))
     except (TypeError, ValueError):
         pct = 0.0
     pct = max(0.0, min(100.0, pct))
     band = tpl.band_for(pct)
 
     # The band is derived here, never taken from the model — the label has to
-    # follow the number, or the brief contradicts itself.
-    fields["Likelihood of Winning"] = f"{pct:.0f}% — {band}"
+    # follow the number, or the brief contradicts itself. The current template
+    # asks for the score in two places; both get the same string, so they cannot
+    # disagree.
+    stated = f"{pct:.0f}% — {band}"
+    for row in model.questions:
+        if tpl.is_likelihood_row(row.label):
+            values[row.number] = stated
 
-    # The fit matrix is walked in the TEMPLATE's order, not the reply's, and
-    # keyed to the template's own domain names. The model is told not to rename
-    # or drop a domain, but the matrix is a fixed part of the document either
-    # way: a domain it skipped has to appear as an unanswered row, because the
-    # rows exist in the sheet whether or not there is anything to put in them.
-    by_domain = {}
-    for d in (result.get("fit_assessment") or result.get("fit_dimensions") or []):
-        if isinstance(d, dict):
-            key = re.sub(r"[^a-z0-9]+", " ", str(d.get("dimension", "")).lower()).strip()
-            if key and key not in by_domain:
-                by_domain[key] = d
-
-    dims, unanswered = [], []
-    for domain in tpl.FIT_DOMAINS:
-        key = re.sub(r"[^a-z0-9]+", " ", domain.lower()).strip()
-        d = by_domain.get(key) or {}
-        rating = str(d.get("rating", "")).strip().upper()
-        if rating not in tpl.FIT_RATINGS:
-            rating = "NONE"
-        required = str(d.get("required", "")).strip()
-        evidence = str(d.get("evidence", "")).strip()
-        if not d:
-            unanswered.append(domain)
-            required = required or "Not addressed by the analysis."
-            evidence = evidence or "Not addressed by the analysis."
-        dims.append({
-            "dimension": domain,
-            "required": required or "Not stated in the tender.",
-            "evidence": evidence or "No documented evidence.",
-            "rating": rating,
-        })
-        # Column B is what the tender demands, column C what Onepoint can show —
-        # the two questions the matrix's own header asks.
-        fields[domain] = dims[-1]["required"]
-        details[domain] = f"{rating} — {dims[-1]['evidence']}"
-
-    if unanswered:
-        logger.warning(
-            f"{len(unanswered)} fit domain(s) absent from the model reply and "
-            f"written as unanswered: {unanswered[:4]}"
-            f"{'…' if len(unanswered) > 4 else ''}"
-        )
+    recommendation = ""
+    for row in model.questions:
+        if tpl._key(row.label) == "recommendation":
+            recommendation = values.get(row.number, "")
+            break
 
     pack_docs = pack_docs if pack_docs is not None else TenderDocuments()
 
-    # The evidence base goes in the report only when the template has a row for it
-    # — the sheet's structure is maintained by hand, so an unconfigured label would
-    # warn on every run about a row nobody has added.
+    # The evidence base goes in the report only when the template has a row for
+    # it — the sheet's structure is maintained by hand, so an unconfigured label
+    # would otherwise be asked of the model as though it were a question.
     if TENDER_DOCS_MANIFEST_FIELD:
-        lines = pack_docs.manifest_lines()
-        fields[TENDER_DOCS_MANIFEST_FIELD] = (
-            "\n".join(lines) if lines
-            else "No tender documents were available; assessed on the tender summary alone."
-        )
+        wanted = tpl._key(TENDER_DOCS_MANIFEST_FIELD)
+        for row in model.questions:
+            if tpl._key(row.label) == wanted:
+                lines = pack_docs.manifest_lines()
+                values[row.number] = (
+                    "\n".join(lines) if lines
+                    else "No tender documents were available; assessed on the "
+                         "tender summary alone."
+                )
+                break
 
-    recommendation = fields.get("Recommendation", "").strip()
     logger.info(
         f"Brief complete: likelihood {pct:.0f}% ({band}), "
-        f"{len(dims)} fit domain(s), {len(tpl.derived_fields()) - len(missing)}"
-        f"/{len(tpl.derived_fields())} fields answered, "
+        f"{len(values)} row(s) answered ({len(asks) - len(missing)}/{len(asks)} "
+        f"from the model), {len(more)} second-column value(s), "
+        f"{sum(len(v) for v in generated_rows.values())} generated row(s), "
         f"{len(pack_docs.used)} document(s) in evidence"
     )
     return TenderBrief(
-        fields=fields, details=details, fit_dimensions=dims, likelihood_pct=pct,
-        likelihood_band=band, recommendation=recommendation,
-        analysis_date=date_str, raw=result, documents=pack_docs,
+        values=values, more=more, generated_rows=generated_rows,
+        likelihood_pct=pct, likelihood_band=band, recommendation=recommendation,
+        analysis_date=date_str, raw=result, documents=pack_docs, template=model,
     )
 
 
