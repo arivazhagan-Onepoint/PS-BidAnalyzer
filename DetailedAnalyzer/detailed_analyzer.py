@@ -147,6 +147,101 @@ CONTEXT_FIELDS = (
 # would otherwise push the rest of the brief down the sheet indefinitely.
 MAX_GENERATED_ROWS = 12
 
+# One date format for the whole brief (requested 2026-09-15). It is enforced in
+# BOTH directions, which is the only way it holds: the prompt asks the model for
+# it, and every date this code fills in — the tracker's own dates, today's date,
+# the countdown — is rendered through it too. Stating it only in the prompt would
+# have left "2026-09-18" from the tracker sitting beside "18-Sep-2026" from the
+# model in the same table.
+#
+# Time is included ONLY where a time is genuinely known. The tracker holds dates
+# without times, so inventing "12:00 AM" for them would be fabricating precision
+# the source never had — the same rule the rest of this module follows about
+# never filling a gap with something plausible.
+REPORT_DATE_FORMAT = "%d-%b-%Y"
+REPORT_DATETIME_FORMAT = "%d-%b-%Y %I:%M %p"
+REPORT_DATE_EXAMPLE = "DD-MMM-YYYY (e.g. 18-Sep-2026)"
+REPORT_DATETIME_EXAMPLE = "DD-MMM-YYYY HH:MM AM/PM (e.g. 18-Sep-2026 12:00 PM)"
+
+# Formats a tracker or model date may arrive in. Ordered longest-first so a value
+# carrying a time is not truncated to its date by an earlier date-only match.
+# "%d-%b-%Y" is in the list because it is what this module now asks for — without
+# it, a correctly-formatted reply would fail to parse and its countdown would
+# silently vanish from the report's third column.
+_DATE_INPUT_FORMATS = (
+    ("%Y-%m-%d %H:%M", True), ("%Y-%m-%dT%H:%M", True),
+    ("%d/%m/%Y %H:%M", True), ("%d-%b-%Y %I:%M %p", True),
+    ("%d-%b-%Y %H:%M", True),
+    ("%Y-%m-%d", False), ("%d/%m/%Y", False), ("%d-%m-%Y", False),
+    ("%d/%m/%y", False), ("%m/%d/%Y", False),
+    ("%d-%b-%Y", False), ("%d %b %Y", False), ("%d-%B-%Y", False),
+    ("%d %B %Y", False),
+)
+
+
+def _parse_datetime(raw: str):
+    """Parse a date that may or may not carry a time. Returns (datetime, has_time)."""
+    text = (raw or "").strip().replace("T", " ")
+    if not text:
+        return None, False
+    # Trim a trailing timezone or seconds fragment the formats below do not take.
+    for fmt, has_time in _DATE_INPUT_FORMATS:
+        try:
+            return datetime.strptime(text, fmt), has_time
+        except ValueError:
+            continue
+    return None, False
+
+
+# Splits an inline numbered list onto separate lines. The prompt asks for this
+# and the model does not reliably comply — measured 2026-09-15, where the
+# clarification questions came back as "1. Can you provide…? 2. Are there any…"
+# on one line — so it is enforced here instead of hoped for.
+#
+# A split point is whitespace followed by "<n>. " — the space after the dot is
+# what keeps version numbers and decimals ("Umbraco 13.2", "£1.5m") out of it.
+# The result is used only when the numbers run 1, 2, 3… in order, so prose that
+# merely mentions "… by 2. " is left alone.
+_NUMBERED_ITEM = re.compile(r"(?<=\s)(?=\d{1,2}\.\s)")
+
+
+def _normalise_numbering(text: str) -> str:
+    """Put each item of an inline numbered list on its own line."""
+    if not text or "\n" in text:
+        return text                      # already laid out; leave it as the model set it
+    parts = _NUMBERED_ITEM.split(text.strip())
+    if len(parts) < 2:
+        return text
+
+    numbers = []
+    for part in parts:
+        match = re.match(r"^(\d{1,2})\.\s", part)
+        numbers.append(int(match.group(1)) if match else None)
+
+    # The first part may be a lead-in sentence before "1."; everything after it
+    # must be the numbered run itself.
+    body = numbers[1:] if numbers[0] is None else numbers
+    if not body or None in body or body != list(range(body[0], body[0] + len(body))):
+        return text
+    if body[0] != 1:
+        return text
+
+    return "\n".join(p.strip() for p in parts if p.strip())
+
+
+def _format_date_value(raw: str) -> str:
+    """Render a date in the brief's format, or "" when it is not a date.
+
+    Returning "" rather than the input is deliberate: the caller keeps whatever
+    it already had, so a range ("18/09/2026 to 02/10/2026") or a phrase ("Not
+    stated in the tender documents") passes through untouched instead of being
+    mangled into something that looks like a date and is not.
+    """
+    when, has_time = _parse_datetime(raw)
+    if when is None:
+        return ""
+    return when.strftime(REPORT_DATETIME_FORMAT if has_time else REPORT_DATE_FORMAT)
+
 
 def _format_tender_facts(tender_data: dict) -> str:
     """Render the CONTEXT_FIELDS present on this row as a label: value list.
@@ -269,8 +364,8 @@ def _questions_block(asks: list, generated: list) -> str:
         # invite a countdown the model is in no position to work out.
         if tpl.is_derived_date(row.label):
             out.append(
-                f"{key} = {row.first_line!r}  -> a date as DD/MM/YYYY, or exactly "
-                f'"Not stated in the tender documents"'
+                f"{key} = {row.first_line!r}  -> a date as {REPORT_DATE_EXAMPLE}, "
+                f'or exactly "Not stated in the tender documents"'
             )
         elif table is not None and table.has_more_column:
             out.append(f'{key} = {row.first_line!r}  -> {{"detail": …, "more": …}}')
@@ -365,12 +460,18 @@ Rules that apply throughout:
 - Where the tender is silent, say "Not stated in the tender documents". For the
   date questions this matters most: a plausible-looking date is worse than an
   admission, because the bid team will plan against whatever this brief says.
-- Answers are cells in a spreadsheet. Keep them self-contained and readable; use
-  short newline-separated bullets where the instruction asks for a list.
+- Answers are cells in a spreadsheet. Keep them self-contained and readable.
 - Do not restate the question in the answer.
 - Where a question takes two parts, "detail" fills the first column and "more"
   the second, named above for that table. Leave "more" as an empty string where
   the second column genuinely adds nothing to that row.
+- DATES AND TIMES follow one format throughout this brief: {REPORT_DATE_EXAMPLE}
+  for a date, and {REPORT_DATETIME_EXAMPLE} where the documents actually state a
+  time. Never invent a time for a date that does not carry one, and never fall
+  back to another format — the same date must not appear two ways in one brief.
+- WHERE AN ANSWER HAS MORE THAN ONE POINT, number them "1.", "2.", "3." and put
+  each on its OWN LINE, separated by a newline. Do not run numbered points
+  together inside a paragraph. A single-point answer needs no number.
 
 QUESTIONS
 {_questions_block(asks, generated)}
@@ -420,7 +521,9 @@ def _deterministic_value(label: str, kind: str, src: str, tender_data: dict,
     if kind == tpl.COMPUTED:
         deadline_raw = (tender_data.get("Tender Due Date", "") or "").strip()
         if src == "run_date":
-            return run_dt.strftime("%d/%m/%Y")
+            # The one date that legitimately carries a time: the run clock knows
+            # it, so the brief states it in full.
+            return run_dt.strftime(REPORT_DATETIME_FORMAT)
         if src == "time_remaining":
             return _time_remaining(deadline_raw, run_dt)
         if src == "urgency":
@@ -448,6 +551,12 @@ def _deterministic_value(label: str, kind: str, src: str, tender_data: dict,
             value = f"{annual} (annual contract value)"
         else:
             value = ""
+
+    # A date column holds the tracker's storage format ("2026-09-18"); the brief
+    # states every date its own way. Left alone when it will not parse, so a
+    # hand-typed note in a date column survives rather than being discarded.
+    if tpl.is_date_value(label):
+        value = _format_date_value(value) or value
 
     return value or "Not recorded in the tracker"
 
@@ -490,13 +599,15 @@ def _parse_deadline(raw: str, run_dt: datetime):
     raw = (raw or "").strip()
     if not raw:
         return None
-    # Trim a time or timezone suffix; only the date matters for a countdown.
-    candidate = re.split(r"[T ]", raw)[0]
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d/%m/%y", "%m/%d/%Y"):
-        try:
-            return datetime.strptime(candidate, fmt).date()
-        except ValueError:
-            continue
+    when, _ = _parse_datetime(raw)
+    if when is not None:
+        return when.date()
+    # Retry on the date alone, for a value carrying a time in a shape the format
+    # table does not list (seconds, a timezone suffix). Only the date matters for
+    # a countdown, so dropping the remainder loses nothing.
+    when, _ = _parse_datetime(re.split(r"[T ]", raw)[0])
+    if when is not None:
+        return when.date()
     logger.warning(f"Could not parse deadline {raw!r}; countdown omitted")
     return None
 
@@ -506,11 +617,12 @@ def _time_remaining(deadline_raw: str, run_dt: datetime) -> str:
     if deadline is None:
         return "Unknown — no parseable submission deadline in the tracker"
     days = (deadline - run_dt.date()).days
+    shown = deadline.strftime(REPORT_DATE_FORMAT)
     if days < 0:
-        return f"Deadline passed {abs(days)} day(s) ago ({deadline:%d/%m/%Y})"
+        return f"Deadline passed {abs(days)} day(s) ago ({shown})"
     if days == 0:
-        return f"Closes today ({deadline:%d/%m/%Y})"
-    return f"{days} calendar day(s) ({deadline:%d/%m/%Y})"
+        return f"Closes today ({shown})"
+    return f"{days} calendar day(s) ({shown})"
 
 
 def _milestone_status(raw: str, run_dt: datetime) -> str:
@@ -703,10 +815,10 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         detail, extra = "", ""
 
         if isinstance(answer, dict):
-            detail = str(answer.get("detail", "") or "").strip()
-            extra = str(answer.get("more", "") or "").strip()
+            detail = _normalise_numbering(str(answer.get("detail", "") or "").strip())
+            extra = _normalise_numbering(str(answer.get("more", "") or "").strip())
         elif answer is not None:
-            detail = str(answer).strip()
+            detail = _normalise_numbering(str(answer).strip())
 
         if not detail:
             missing.append(row.first_line or f"row {row.number}")
@@ -722,6 +834,15 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
             status = _milestone_status(detail, run_dt)
             if status:
                 more[row.number] = status
+
+        # Re-render a model-supplied date in the brief's format. The prompt asks
+        # for it, this makes sure of it — and leaves anything that is not a single
+        # date ("18-Sep-2026 to 02-Oct-2026", "Not stated in the tender documents")
+        # exactly as it came.
+        if tpl.is_date_value(row.label):
+            formatted = _format_date_value(values[row.number])
+            if formatted:
+                values[row.number] = formatted
 
     if missing:
         logger.warning(
@@ -740,9 +861,11 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
             name = str(item.get("name", "") or "").strip()
             if not name:
                 continue
-            cells = [name, str(item.get("detail", "") or "").strip()]
+            cells = [name, _normalise_numbering(str(item.get("detail", "") or "").strip())]
             if table.has_more_column:
-                cells.append(str(item.get("more", "") or "").strip())
+                cells.append(
+                    _normalise_numbering(str(item.get("more", "") or "").strip())
+                )
             rows.append(cells)
         if rows:
             generated_rows[table.header.number] = rows

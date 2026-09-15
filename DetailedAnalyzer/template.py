@@ -88,6 +88,22 @@ MILESTONE_DATES = frozenset({
     _key("Submission Deadline"),
 })
 
+# Rows whose value IS a date, wherever it comes from — so the code can render
+# them in the brief's own date format rather than passing the tracker's storage
+# format through. The milestone rows plus the one date that sits outside that
+# table.
+DATE_VALUED = frozenset({
+    _key("ITT Issue Date"),
+    _key("Clarification Deadline"),
+    _key("Clarifications Response"),
+    _key("Tender Submission Due"),
+    _key("Supplier Presentations"),
+    _key("Evaluation Completion"),
+    _key("Contract Commencement"),
+    _key("Submission Deadline"),
+    _key("RFP Submission Date"),
+})
+
 # Milestone rows the tracker cannot answer. Asked of the model as dates, with an
 # explicit instruction to admit silence rather than produce a plausible one.
 DERIVED_DATES = frozenset({
@@ -143,6 +159,11 @@ def is_derived_date(label: str) -> bool:
 
 def is_milestone_date(label: str) -> bool:
     return _key(label) in MILESTONE_DATES
+
+
+def is_date_value(label: str) -> bool:
+    """True when this row's value is a date and should be rendered as one."""
+    return _key(label) in DATE_VALUED
 
 
 def is_likelihood_row(label: str) -> bool:
