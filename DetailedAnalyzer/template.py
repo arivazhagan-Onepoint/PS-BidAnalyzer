@@ -88,38 +88,37 @@ MILESTONE_DATES = frozenset({
     _key("Submission Deadline"),
 })
 
-# Rows where the TENDER PACK outranks the tracker (user's precedence, 2026-09-15:
-# the buyer's own documents first, latest version first; the tracker only where
-# the documents are silent).
+# SOURCE PRECEDENCE (user, 2026-09-15): the buyer's own tender documents first,
+# latest version first; the tracker only where the documents are silent.
 #
-# These describe the PROCUREMENT — what is being bought, on what terms, through
-# which vehicle — and the tracker holds only a scraped abstract of that. Measured
-# on the CITB tender, where every one of them was wrong or empty in the tracker:
-# both value columns held "GBP 0.00"; Contract Duration read "12 months (+ up to
-# 48 months extension)" where the ITT says one year plus four one-year extensions
-# to a five-year maximum; and Portal Name said "Find-A-Tender", which is where
-# the NOTICE was scraped from, not the Delta eSourcing portal the procurement
-# actually runs through.
+# The tracker is a scraped abstract of the notice, and measured on the CITB
+# tender it was wrong or empty on every row anyone checked: both value columns
+# held "GBP 0.00"; Contract Duration read "12 months (+ up to 48 months
+# extension)" where the ITT says one year plus four one-year extensions to a
+# five-year maximum; and Portal Name said "Find-A-Tender", which is where the
+# NOTICE was scraped from, not the Delta eSourcing portal the procurement runs
+# through.
 #
-# The rows NOT in here identify the record rather than describe the procurement —
-# Client Name, Project Title, Opportunity Reference, the notice URL — and for
-# those the tracker is the system of record, not an abstract of something else.
-# The clock rows stay computed for the obvious reason that no tender document can
-# state today's date.
-#
-# The tracker's value is still offered to the model as the fallback to use when
-# the pack says nothing, so this loses nothing when the documents are silent.
-PACK_FIRST = frozenset({
-    _key("Budget (Max/Indicative)"),
-    _key("Contract Length"),
-    _key("Procurement Portal"),
-    _key("Location"),
-})
-
-
+# Nothing is lost when the documents are silent: the tracker's value is offered
+# to the model as the fallback, and applied after parsing if the pack turns out
+# to say nothing.
 def is_pack_first(label: str) -> bool:
-    """True when the pack outranks the tracker for this row."""
-    return _key(label) in PACK_FIRST
+    """True when the pack outranks the tracker for this row.
+
+    Every row the TRACKER answers, without exception — the rule is general
+    (user, 2026-09-15: "always the priority should be the Tender packs… tracker
+    should only be a fall-back option when the information is not available in
+    the pack"), so it is expressed as the rule rather than as a list somebody has
+    to remember to extend.
+
+    COMPUTED rows are the only ones left out, and not as an exception to the
+    precedence: no tender document can state today's date or how many days remain,
+    because those are facts about the clock rather than about the tender. The
+    deadline those countdowns are measured FROM is pack-first like everything
+    else, and the countdown is recomputed once it is known.
+    """
+    found = DETERMINISTIC.get(_key(label))
+    return bool(found) and found[0] == SHEET
 
 
 # Rows whose value IS a date, wherever it comes from — so the code can render

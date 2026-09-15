@@ -433,10 +433,12 @@ Onepoint's Drive. This is the authoritative statement of what is being asked for
 where it and the tender summary above disagree about requirements, scope, or
 evaluation, THE PACK WINS and the summary is treated as an abstract of it. Quote
 specifics from it — mandatory requirements, evaluation weightings, certifications,
-insurance and SLA terms — rather than describing them in general terms. Two
-limits: the computed timeline below remains authoritative for dates, and a
-document shown as truncated is incomplete, so do not read the absence of something
-in it as evidence that the pack is silent on that point:
+insurance and SLA terms — rather than describing them in general terms. This
+holds for dates as well: where the pack states a deadline, the pack's date is the
+answer. The only thing it cannot tell you is today's date and the resulting
+countdown, which are given below. One limit: a document shown as truncated is
+incomplete, so do not read the absence of something in it as evidence that the
+pack is silent on that point:
 ---
 {pack}
 ---
@@ -444,8 +446,19 @@ in it as evidence that the pack is silent on that point:
     elif pack_absent_note:
         pack_block = f"\n{pack_absent_note}\n"
 
-    keys = [f"r{row.number}" for row, _ in asks]
-    keys += [f"t{t.header.number}" for t in generated]
+    # In row order, and with the generated tables shown as the arrays they are.
+    # Rendered as a bare "t88": … alongside 74 scalar keys, the one table key was
+    # simply omitted from the reply (measured 2026-09-15, leaving Section 7 empty)
+    # — the shape has to say it is a list, or it reads as one more prose answer.
+    shapes = [(row.number, f'  "r{row.number}": …,') for row, _ in asks]
+    shapes += [
+        (t.header.number,
+         f'  "t{t.header.number}": [{{"name": …, "detail": …'
+         + (', "more": …' if t.has_more_column else '')
+         + '}, …],   <-- REQUIRED: a list, never omitted')
+        for t in generated
+    ]
+    keys = [line for _, line in sorted(shapes, key=lambda x: x[0])]
 
     return f"""Onepoint capability context (use ONLY this to judge capability):
 ---
@@ -459,7 +472,12 @@ Description: {description}
 Tender facts:
 {facts}
 
-Timeline (computed — authoritative, use this rather than inferring dates):
+Today, and the countdown (computed from the clock — the tender documents cannot
+state these, so take them from here and nowhere else). The deadline the countdown
+is measured from comes from Onepoint's tracker; if the tender documents state a
+different submission deadline, ANSWER WITH THE DOCUMENTS' DATE — the countdown is
+recomputed from it afterwards — and say in the timeline verdict that the two
+disagree:
 {timeline}
 
 You are completing Onepoint's bid qualification brief. Below is every question the
@@ -514,7 +532,7 @@ however attractive the work looks.
 Respond with ONLY a JSON object, no markdown fence, no preamble. Every key below
 must be present:
 {{
-{chr(10).join(f'  "{k}": …,' for k in keys)}
+{chr(10).join(keys)}
   "likelihood_pct": <integer 0-100>
 }}"""
 
@@ -809,7 +827,8 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
 
             result = _parse_response(raw)
             return _to_brief(result, model, asks, generated, det_values, det_more,
-                             date_str, run_date, pack_docs, fallbacks)
+                             date_str, run_date, pack_docs, fallbacks,
+                             (tender_data.get('Tender Due Date', '') or '').strip())
 
         except Exception as e:
             last_error = e
@@ -851,7 +870,8 @@ def _reads_as_silent(text: str) -> bool:
 
 def _to_brief(result: dict, model, asks, generated, det_values: dict,
               det_more: dict, date_str: str, run_dt: datetime,
-              pack_docs: TenderDocuments = None, fallbacks: dict = None) -> TenderBrief:
+              pack_docs: TenderDocuments = None, fallbacks: dict = None,
+              tracker_deadline: str = "") -> TenderBrief:
     """Assemble a TenderBrief from the model's reply plus the filled-in facts.
 
     Every row the template asked about is accounted for: a key the model omitted
@@ -949,6 +969,13 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         if tpl.is_likelihood_row(row.label):
             values[row.number] = stated
 
+    # The countdown was computed before the call, from the tracker's deadline,
+    # because the model needed to know how long was left in order to answer. Now
+    # that the pack has spoken, recompute it from whichever deadline actually
+    # won — otherwise a brief could state the ITT's date beside a countdown
+    # measured from a different one, which is worse than either alone.
+    _recompute_countdown(model, values, tracker_deadline, run_dt)
+
     recommendation = ""
     for row in model.questions:
         if tpl._key(row.label) == "recommendation":
@@ -984,6 +1011,45 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         likelihood_pct=pct, likelihood_band=band, recommendation=recommendation,
         analysis_date=date_str, raw=result, documents=pack_docs, template=model,
     )
+
+
+def _recompute_countdown(model, values: dict, tracker_deadline: str,
+                         run_dt: datetime):
+    """Re-derive Time Remaining and Urgency Status from the winning deadline.
+
+    Mutates ``values``. Does nothing when the brief's submission deadline does not
+    parse — a countdown measured from a phrase would be invented, and the row
+    already computed from the tracker is the better of the two answers available.
+    """
+    stated = ""
+    for row in model.questions:
+        if tpl._key(row.label) == tpl._key("Submission Deadline"):
+            stated = values.get(row.number, "")
+            break
+    if not stated:
+        return
+
+    when, _ = _parse_datetime(stated)
+    if when is None:
+        return
+
+    tracker_when = _parse_deadline(tracker_deadline, run_dt)
+    if tracker_when and tracker_when != when.date():
+        logger.warning(
+            f"Submission deadline differs between sources: tender documents say "
+            f"{when.date():%d-%b-%Y}, tracker says {tracker_when:%d-%b-%Y}. The "
+            f"documents win; the countdown is measured from their date."
+        )
+
+    authoritative = when.strftime("%Y-%m-%d")
+    for row in model.questions:
+        found = tpl.deterministic_for(row.label)
+        if not found or found[0] != tpl.COMPUTED:
+            continue
+        if found[1] == "time_remaining":
+            values[row.number] = _time_remaining(authoritative, run_dt)
+        elif found[1] == "urgency":
+            values[row.number] = _urgency(authoritative, run_dt)
 
 
 def _parse_response(raw: str) -> dict:
