@@ -579,6 +579,17 @@ RENAME_REPORT_TAB = False
 TEMPLATE_DETAIL_COL = "B"
 TEMPLATE_MORE_COL = "C"
 
+# Wrap every cell in the finished report, and let each row grow to fit what it
+# holds. The brief's answers are paragraphs and numbered lists, not the short
+# values a spreadsheet usually carries, so without this a reader sees the first
+# line of an assessment and has to click each cell to read the rest.
+#
+# Row auto-resize is part of the same setting rather than a separate one: turning
+# wrapping on while the template's fixed row heights stay put just clips the text
+# at the old height, which looks like the answer was truncated. Applied to the
+# COPY only — the template itself is never written to.
+REPORT_WRAP_TEXT = True
+
 # Master switch for creating reports in Drive. Unlike WRITE_BACK_ENABLED below
 # this ships TRUE: the report IS the deliverable, it is written to a folder set
 # aside for exactly this, and a wrong one can simply be trashed. Set False to

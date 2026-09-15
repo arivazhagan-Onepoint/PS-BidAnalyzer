@@ -49,6 +49,7 @@ from .config import (
     RENAME_REPORT_TAB,
     TEMPLATE_DETAIL_COL,
     TEMPLATE_MORE_COL,
+    REPORT_WRAP_TEXT,
 )
 from . import template_reader as tr
 
@@ -195,6 +196,35 @@ class ReportWriter:
             return n + sum(c for at, c in inserts if n > at)
         return shift
 
+    def _wrap_and_fit(self, file_id: str, tab_id: int):
+        """Wrap every cell, then let the rows grow to fit what they hold.
+
+        Run AFTER the values are written, because auto-resize measures the
+        content that is actually there. Best effort: a report whose text is
+        readable but unwrapped is still a usable brief, so a formatting failure
+        is logged rather than allowed to lose the run's work.
+        """
+        try:
+            self.sheets.spreadsheets().batchUpdate(
+                spreadsheetId=file_id,
+                body={"requests": [
+                    {"repeatCell": {
+                        "range": {"sheetId": tab_id},
+                        "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
+                        "fields": "userEnteredFormat.wrapStrategy",
+                    }},
+                    {"autoResizeDimensions": {
+                        "dimensions": {"sheetId": tab_id, "dimension": "ROWS"},
+                    }},
+                ]},
+            ).execute()
+        except HttpError as e:
+            logger.warning(
+                f"Could not apply word wrap to report {file_id}: "
+                f"HTTP {e.resp.status} {e.reason}. The brief is written and "
+                f"complete; only its formatting is unchanged."
+            )
+
     def fill_report(self, file_id: str, brief, report_title: str = "") -> dict:
         """Write the brief into the copied report. Returns a small stats dict.
 
@@ -273,6 +303,9 @@ class ReportWriter:
                 spreadsheetId=file_id,
                 body={"valueInputOption": "RAW", "data": data},
             ).execute()
+
+        if REPORT_WRAP_TEXT:
+            self._wrap_and_fit(file_id, tab_id)
 
         logger.info(
             f"Filled report {file_id}: {written} value(s) in column "
