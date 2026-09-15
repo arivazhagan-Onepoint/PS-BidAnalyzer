@@ -158,6 +158,13 @@ MAX_GENERATED_ROWS = 12
 # without times, so inventing "12:00 AM" for them would be fabricating precision
 # the source never had — the same rule the rest of this module follows about
 # never filling a gap with something plausible.
+# What a code-filled row says when the tracker column is empty. Named because
+# the precedence logic has to recognise it: a PACK_FIRST row whose tracker value
+# is only this placeholder has no fallback worth having, and saying "not recorded
+# in the tracker" would pin the gap on the tracker when the documents were silent
+# too.
+NOT_IN_TRACKER = "Not recorded in the tracker"
+
 REPORT_DATE_FORMAT = "%d-%b-%Y"
 REPORT_DATETIME_FORMAT = "%d-%b-%Y %I:%M %p"
 REPORT_DATE_EXAMPLE = "DD-MMM-YYYY (e.g. 18-Sep-2026)"
@@ -309,13 +316,14 @@ def _plan(model, filled_rows: set) -> tuple:
     return asks, generated
 
 
-def _questions_block(asks: list, generated: list) -> str:
+def _questions_block(asks: list, generated: list, fallbacks: dict = None) -> str:
     """Render the template's own questions, grouped the way the sheet groups them.
 
     Walked in row order, generated tables included in their proper place — the
     sheet's sequence is how a reader understands the brief, and a question asked
     out of order invites an answer written for the wrong context.
     """
+    fallbacks = fallbacks or {}
     entries = [(row.number, "ask", (row, table)) for row, table in asks]
     entries += [(t.header.number, "table", t) for t in generated]
     entries.sort(key=lambda e: e[0])
@@ -377,11 +385,21 @@ def _questions_block(asks: list, generated: list) -> str:
         else:
             out.append(f"{key} = {row.first_line!r}")
 
+        # Where the tracker has an answer the pack outranks, state it as the
+        # fallback rather than as the answer — so a silent pack still produces
+        # a filled row, and a pack that speaks is never overruled by a scrape.
+        if row.number in fallbacks:
+            out.append(
+                f"      (answer from the tender documents. Only if they are "
+                f"silent, use the tracker's value: {fallbacks[row.number]!r})"
+            )
+
     return "\n".join(out)
 
 
 def _build_prompt(model, asks, generated, title, description, facts, context,
-                  corpus="", timeline="", pack="", pack_absent_note="") -> str:
+                  corpus="", timeline="", pack="", pack_absent_note="",
+                  fallbacks=None) -> str:
     """Assemble the prompt asking for every row the template still needs."""
     context_block = context if context else "(No Onepoint capability context provided.)"
 
@@ -455,6 +473,16 @@ in the cell beside it, which is where it will be written; it is not part of the
 question.
 
 Rules that apply throughout:
+- SOURCE PRECEDENCE for anything about the client, the contract or the
+  procurement. The tender pack comes FIRST: it is the buyer's own published
+  documents and the thing a bid is actually evaluated against. Onepoint's
+  tracker comes second, and only where the pack is silent — it is a scraped
+  abstract of the notice, so where the two disagree, the pack is right and the
+  tracker is out of date. Superseded versions have already been removed from the
+  pack above, so every document you can see is current; if two of them still
+  disagree, prefer the later-issued one and say that they differ.
+  Where a question below names the tracker's value, that value is the FALLBACK
+  for a silent pack, never an answer to prefer over the documents.
 - Judge capability ONLY from the documented evidence above. Where there is no
   evidence, say "No documented evidence" rather than softening it.
 - Where the tender is silent, say "Not stated in the tender documents". For the
@@ -474,7 +502,7 @@ Rules that apply throughout:
   together inside a paragraph. A single-point answer needs no number.
 
 QUESTIONS
-{_questions_block(asks, generated)}
+{_questions_block(asks, generated, fallbacks)}
 
 Also give "likelihood_pct": an integer 0-100 for Onepoint's likelihood of winning
 this bid. Do not name the band — it is derived from your percentage, and written
@@ -558,16 +586,18 @@ def _deterministic_value(label: str, kind: str, src: str, tender_data: dict,
     if tpl.is_date_value(label):
         value = _format_date_value(value) or value
 
-    return value or "Not recorded in the tracker"
+    return value or NOT_IN_TRACKER
 
 
 def _fill_deterministic(model, tender_data: dict, run_dt: datetime) -> tuple:
     """Fill every row the tracker or the clock answers.
 
-    Returns (values, more, computed_by_label) — the last so the timeline block
-    can be stated to the model without re-deriving it.
+    Returns (values, more, computed_by_label, fallbacks). ``fallbacks`` holds the
+    tracker's answer for rows the PACK outranks it on: those are asked of the
+    model instead of filled, and the tracker's value is offered as what to fall
+    back on if the documents turn out to be silent.
     """
-    values, more, by_label = {}, {}, {}
+    values, more, by_label, fallbacks = {}, {}, {}, {}
 
     for row in model.questions:
         found = tpl.deterministic_for(row.label)
@@ -575,8 +605,16 @@ def _fill_deterministic(model, tender_data: dict, run_dt: datetime) -> tuple:
             continue
         kind, src = found
         text = _deterministic_value(row.label, kind, src, tender_data, run_dt)
-        values[row.number] = text
         by_label[tpl._key(row.label)] = text
+
+        if tpl.is_pack_first(row.label):
+            # Only a real tracker value is worth falling back to. Where the
+            # tracker is empty too, the model's own "not stated" answer is the
+            # honest one and is left to stand.
+            if text != NOT_IN_TRACKER:
+                fallbacks[row.number] = text
+            continue
+        values[row.number] = text
 
         # The milestone table's third column asks for each date to be read
         # against today. That is arithmetic, so it is done here.
@@ -586,7 +624,7 @@ def _fill_deterministic(model, tender_data: dict, run_dt: datetime) -> tuple:
             if status:
                 more[row.number] = status
 
-    return values, more, by_label
+    return values, more, by_label, fallbacks
 
 
 def _parse_deadline(raw: str, run_dt: datetime):
@@ -697,11 +735,12 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
     title = (tender_data.get("Name", "") or "").strip()
     description = (tender_data.get("Tender Description", "") or "").strip()
 
-    det_values, det_more, computed = _fill_deterministic(model, tender_data, run_date)
+    det_values, det_more, computed, fallbacks = _fill_deterministic(
+        model, tender_data, run_date)
 
     if not title and not description:
         return TenderBrief(
-            values=det_values, more=det_more, likelihood_pct=0.0,
+            values={**fallbacks, **det_values}, more=det_more, likelihood_pct=0.0,
             likelihood_band="LOW",
             recommendation="No tender title or description available to analyse.",
             analysis_date=date_str, analysis_failed=True, template=model,
@@ -732,6 +771,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
         model, asks, generated, title, description,
         _format_tender_facts(tender_data), context, corpus,
         _timeline_block(computed), pack_docs.as_prompt_block(), pack_absent_note,
+        fallbacks,
     )
 
     last_error = None
@@ -769,7 +809,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
 
             result = _parse_response(raw)
             return _to_brief(result, model, asks, generated, det_values, det_more,
-                             date_str, run_date, pack_docs)
+                             date_str, run_date, pack_docs, fallbacks)
 
         except Exception as e:
             last_error = e
@@ -786,7 +826,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
     )
     time.sleep(API_THROTTLE_SECONDS)
     return TenderBrief(
-        values=det_values, more=det_more, likelihood_pct=0.0,
+        values={**fallbacks, **det_values}, more=det_more, likelihood_pct=0.0,
         likelihood_band="LOW",
         recommendation=(
             f"Detailed analysis could not be completed after {DETAIL_MAX_RETRIES} "
@@ -798,9 +838,20 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
     )
 
 
+# Answers that mean "the documents do not say", for the precedence fallback.
+_SILENT_ANSWER = re.compile(
+    r"^(not stated|not specified|not mentioned|not provided|not available|"
+    r"no documented evidence|not addressed|unknown|n/?a|tbc|tbd)\b", re.I)
+
+
+def _reads_as_silent(text: str) -> bool:
+    """True when an answer says the documents are silent rather than answering."""
+    return not text.strip() or bool(_SILENT_ANSWER.match(text.strip()))
+
+
 def _to_brief(result: dict, model, asks, generated, det_values: dict,
               det_more: dict, date_str: str, run_dt: datetime,
-              pack_docs: TenderDocuments = None) -> TenderBrief:
+              pack_docs: TenderDocuments = None, fallbacks: dict = None) -> TenderBrief:
     """Assemble a TenderBrief from the model's reply plus the filled-in facts.
 
     Every row the template asked about is accounted for: a key the model omitted
@@ -808,6 +859,7 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
     because a brief with a quietly missing row reads as complete.
     """
     values, more = dict(det_values), dict(det_more)
+    fallbacks = fallbacks or {}
     missing = []
 
     for row, table in asks:
@@ -820,7 +872,13 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         elif answer is not None:
             detail = _normalise_numbering(str(answer).strip())
 
-        if not detail:
+        # A pack-first row the documents turned out to be silent on falls back to
+        # the tracker, which is the second half of the precedence rule — stated
+        # in the prompt and enforced here, so a model that answers "not stated"
+        # still leaves the tracker's value in the brief rather than a blank.
+        if row.number in fallbacks and _reads_as_silent(detail):
+            detail = fallbacks[row.number]
+        elif not detail:
             missing.append(row.first_line or f"row {row.number}")
             detail = "Not addressed by the analysis."
 

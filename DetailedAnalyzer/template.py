@@ -88,6 +88,40 @@ MILESTONE_DATES = frozenset({
     _key("Submission Deadline"),
 })
 
+# Rows where the TENDER PACK outranks the tracker (user's precedence, 2026-09-15:
+# the buyer's own documents first, latest version first; the tracker only where
+# the documents are silent).
+#
+# These describe the PROCUREMENT — what is being bought, on what terms, through
+# which vehicle — and the tracker holds only a scraped abstract of that. Measured
+# on the CITB tender, where every one of them was wrong or empty in the tracker:
+# both value columns held "GBP 0.00"; Contract Duration read "12 months (+ up to
+# 48 months extension)" where the ITT says one year plus four one-year extensions
+# to a five-year maximum; and Portal Name said "Find-A-Tender", which is where
+# the NOTICE was scraped from, not the Delta eSourcing portal the procurement
+# actually runs through.
+#
+# The rows NOT in here identify the record rather than describe the procurement —
+# Client Name, Project Title, Opportunity Reference, the notice URL — and for
+# those the tracker is the system of record, not an abstract of something else.
+# The clock rows stay computed for the obvious reason that no tender document can
+# state today's date.
+#
+# The tracker's value is still offered to the model as the fallback to use when
+# the pack says nothing, so this loses nothing when the documents are silent.
+PACK_FIRST = frozenset({
+    _key("Budget (Max/Indicative)"),
+    _key("Contract Length"),
+    _key("Procurement Portal"),
+    _key("Location"),
+})
+
+
+def is_pack_first(label: str) -> bool:
+    """True when the pack outranks the tracker for this row."""
+    return _key(label) in PACK_FIRST
+
+
 # Rows whose value IS a date, wherever it comes from — so the code can render
 # them in the brief's own date format rather than passing the tracker's storage
 # format through. The milestone rows plus the one date that sits outside that
