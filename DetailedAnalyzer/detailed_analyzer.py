@@ -367,13 +367,18 @@ def _questions_block(asks: list, generated: list, fallbacks: dict = None) -> str
                 out.append(f"Instruction for this table:\n{table.preamble}")
 
         key = f"r{row.number}"
-        # Checked before the table branch: these rows sit inside the milestone
-        # table, whose third column this code computes. Asking for the pair would
-        # invite a countdown the model is in no position to work out.
-        if tpl.is_derived_date(row.label):
+        # Checked before the table branch: every date row takes ONE value, not the
+        # two-part answer its table would otherwise imply. The second column of
+        # the milestone table is a countdown this code computes, and asking the
+        # model to fill it invited it to put the time of day there instead —
+        # measured 2026-09-15, which split "02-Sep-2026" and "12.00 noon" across
+        # the two columns. A stated time belongs WITH its date.
+        if tpl.is_date_value(row.label):
             out.append(
-                f"{key} = {row.first_line!r}  -> a date as {REPORT_DATE_EXAMPLE}, "
-                f'or exactly "Not stated in the tender documents"'
+                f"{key} = {row.first_line!r}  -> ONE value: a date as "
+                f"{REPORT_DATE_EXAMPLE}, or {REPORT_DATETIME_EXAMPLE} where the "
+                f"documents state a time of day — put the time with the date, "
+                f'never on its own. Or exactly "Not stated in the tender documents"'
             )
         elif table is not None and table.has_more_column:
             out.append(f'{key} = {row.first_line!r}  -> {{"detail": …, "more": …}}')
@@ -906,12 +911,16 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         if extra:
             more[row.number] = extra
 
-        # A milestone date the model supplied gets the same column C treatment
-        # the tracker's own dates got — one rule for every row in that table.
-        if table is not None and table.has_more_column and tpl.is_derived_date(row.label):
+        # The milestone table's second column is the real-time status its own
+        # header asks for, and this code owns it outright: whatever the model put
+        # there is discarded, because the only thing that belongs in it is a
+        # countdown, and a countdown is arithmetic.
+        if table is not None and table.has_more_column and tpl.is_milestone_date(row.label):
             status = _milestone_status(detail, run_dt)
             if status:
                 more[row.number] = status
+            else:
+                more.pop(row.number, None)
 
         # Re-render a model-supplied date in the brief's format. The prompt asks
         # for it, this makes sure of it — and leaves anything that is not a single
