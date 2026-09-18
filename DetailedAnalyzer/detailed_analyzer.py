@@ -53,6 +53,9 @@ from .config import (
     API_THROTTLE_SECONDS,
     UK_TIMEZONE,
     TENDER_DOCS_MANIFEST_FIELD,
+    SCORE_COMPONENTS,
+    DEFAULT_WEIGHTS,
+    WEIGHT_SUM_TOLERANCE,
 )
 from .gemini_client import get_client
 from .onepoint_context import load_onepoint_context
@@ -81,6 +84,12 @@ class TenderBrief:
     generated_rows: dict = field(default_factory=dict)  # {header row: [[A,B,C]…]}
     likelihood_pct: float = 0.0
     likelihood_band: str = "LOW"
+    # How the percentage was arrived at: one (label, score, weight, basis) per
+    # criterion, and whether the weights came from the tender or the defaults.
+    # Carried so the log, the email and the brief can all show the arithmetic —
+    # a score that cannot be taken apart cannot be argued with.
+    breakdown: list = field(default_factory=list)
+    weights_source: str = ""
     recommendation: str = ""
     analysis_date: str = ""
     raw: dict = field(default_factory=dict)
@@ -485,6 +494,11 @@ pack is silent on that point:
         for t in generated
     ]
     keys = [line for _, line in sorted(shapes, key=lambda x: x[0])]
+    components = [
+        f'    "{key}": {{"score": <0-100>, "weight_pct": <integer|null>, '
+        f'"basis": …}},   <-- {label}'
+        for key, label, _ in SCORE_COMPONENTS
+    ]
 
     return f"""Onepoint capability context (use ONLY this to judge capability):
 ---
@@ -548,18 +562,28 @@ Rules that apply throughout:
 QUESTIONS
 {_questions_block(asks, generated, fallbacks)}
 
-Also give "likelihood_pct": an integer 0-100 for Onepoint's likelihood of winning
-this bid. Do not name the band — it is derived from your percentage, and written
-into every row of the brief that asks for it. Calibrate honestly: a tender
-Onepoint can evidence against most requirements and has comparable past
-performance for sits high; one where key requirements are unevidenced sits low,
-however attractive the work looks.
+Also give "assessment": Onepoint's standing on each criterion this tender is
+evaluated against. Do NOT give an overall score or name a band — the total is
+calculated from what you give here, so a total of your own would contradict it.
+
+For each criterion:
+- "score" 0-100 — how well Onepoint meets THAT criterion on the documented
+  evidence. Calibrate honestly: evidenced against most requirements with
+  comparable past performance sits high; key requirements unevidenced sits low,
+  however attractive the work looks.
+- "weight_pct" — the weighting THIS TENDER gives that criterion, as an integer,
+  taken from its published scoring matrix. Use null where the tender does not
+  publish one. Never estimate a weight: a guessed weight silently reweights the
+  whole assessment, where a null one is handled openly.
+- "basis" — one sentence saying what the score rests on.
 
 Respond with ONLY a JSON object, no markdown fence, no preamble. Every key below
 must be present:
 {{
 {chr(10).join(keys)}
-  "likelihood_pct": <integer 0-100>
+  "assessment": {{
+{chr(10).join(components)}
+  }}
 }}"""
 
 
@@ -883,6 +907,98 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
     )
 
 
+def _weighted_score(result: dict) -> tuple:
+    """(percentage, breakdown, weights source) from the model's per-criterion scores.
+
+    The total is arithmetic done HERE, never taken from the model — the same rule
+    the band label and the countdown already follow. Measured 2026-09-18: ten runs
+    of row 542 on identical inputs, asked for one holistic figure, returned
+    30-65% and crossed the NoBid/TBD line in both directions. Three judged
+    components against fixed weights cannot swing that far, and every point of the
+    result can be traced to a line the reader can disagree with.
+
+    Returns (None, [], "") when the reply cannot be scored, which the caller
+    treats as a failed analysis rather than as a zero — a tender that was never
+    scored must not be recorded as one that scored nothing.
+    """
+    assessment = result.get("assessment")
+    if not isinstance(assessment, dict):
+        return None, [], ""
+
+    scores, stated, bases = {}, {}, {}
+    for key, label, _ in SCORE_COMPONENTS:
+        entry = assessment.get(key)
+        if not isinstance(entry, dict):
+            logger.warning(f"  assessment is missing '{key}'; cannot score")
+            return None, [], ""
+        try:
+            scores[key] = max(0.0, min(100.0, float(entry.get("score"))))
+        except (TypeError, ValueError):
+            logger.warning(f"  assessment '{key}' has no usable score")
+            return None, [], ""
+        raw_weight = entry.get("weight_pct")
+        try:
+            stated[key] = None if raw_weight is None else float(raw_weight)
+        except (TypeError, ValueError):
+            stated[key] = None
+        bases[key] = str(entry.get("basis", "") or "").strip()
+
+    # The tender's own weights win, exactly as its documents do everywhere else —
+    # but only as a complete, plausible set. A partial matrix would quietly drop
+    # whichever criterion the model failed to find a weight for.
+    total = sum(w for w in stated.values() if w is not None)
+    if (all(w is not None for w in stated.values())
+            and abs(total - 100.0) <= WEIGHT_SUM_TOLERANCE):
+        weights, source = stated, "tender"
+    else:
+        weights = {k: float(v) for k, v in DEFAULT_WEIGHTS.items()}
+        source = "default"
+        if any(w is not None for w in stated.values()):
+            logger.info(
+                f"  published weights unusable (sum {total:.0f}%); "
+                f"applying Onepoint defaults"
+            )
+
+    divisor = sum(weights.values())
+    if divisor <= 0:
+        return None, [], ""
+
+    pct = sum(scores[k] * weights[k] for k in scores) / divisor
+    breakdown = [
+        (label, scores[key], weights[key], bases[key])
+        for key, label, _ in SCORE_COMPONENTS
+    ]
+    return max(0.0, min(100.0, pct)), breakdown, source
+
+
+def _breakdown_sentence(pct: float, breakdown: list, source: str) -> str:
+    """The arithmetic in words, for the brief's explanation row and the log."""
+    parts = " + ".join(
+        f"{label} {weight:.0f}% x {score:.0f}"
+        for label, score, weight, _ in breakdown
+    )
+    origin = ("weights from the tender's published scoring matrix"
+              if source == "tender"
+              else "the tender publishes no scoring matrix, so Onepoint's "
+                   "default weights are applied")
+    return f"Weighted score {pct:.0f}% = {parts}, divided by 100 ({origin})."
+
+
+# A sentence in which the model states an overall percentage of its own. The
+# total is computed now, so any figure the model volunteers is a leftover from
+# when it was asked for one — and it does not match: briefs scoring 68% and 70%
+# both closed with "Likelihood of winning is 45%" on 2026-09-18, contradicting
+# the figure stated twice above it in the same cell.
+#
+# Deliberately narrow. It needs a scoring word AND a percentage in the same
+# sentence, so "the technical criterion carries 70%" and the per-criterion basis
+# lines survive untouched — only a rival verdict is removed.
+_PCT_CLAIM = re.compile(
+    r"(?i)(?<![^.\s])[^.]*\b(?:likelihood|overall score|probability|chance)\b"
+    r"[^.]*?\b\d{1,3}\s?%[^.]*\.\s*"
+)
+
+
 # Answers that mean "the documents do not say", for the precedence fallback.
 _SILENT_ANSWER = re.compile(
     r"^(not stated|not specified|not mentioned|not provided|not available|"
@@ -983,11 +1099,16 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
                 f"its placeholder rows are left as the template has them"
             )
 
-    try:
-        pct = float(result.get("likelihood_pct", 0))
-    except (TypeError, ValueError):
-        pct = 0.0
-    pct = max(0.0, min(100.0, pct))
+    pct, breakdown, weights_source = _weighted_score(result)
+    scoring_failed = pct is None
+    if scoring_failed:
+        # Every question may have been answered well; only the score is missing.
+        # TBD is the honest record — NoBid would assert a judgement never made.
+        logger.warning(
+            "  reply carried no usable assessment; recording the brief as "
+            "not scored"
+        )
+        pct, breakdown, weights_source = 0.0, [], ""
     band = tpl.band_for(pct)
 
     # The band is derived here, never taken from the model — the label has to
@@ -999,6 +1120,37 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
         if tpl.is_likelihood_row(row.label):
             values[row.number] = stated
 
+    # The explanation row states the arithmetic before the model's reasoning.
+    # Stated in code because it IS the calculation — a model asked to describe a
+    # weighting it did not perform describes one that never happened (measured
+    # 2026-09-18, where the brief cited weights against an unweighted score).
+    if breakdown:
+        sentence = _breakdown_sentence(pct, breakdown, weights_source)
+        for row in model.questions:
+            if tpl.is_likelihood_explanation_row(row.label):
+                reasoning = values.get(row.number, "").strip()
+                # The percentage is the code's to state; a second one here reads
+                # as a correction of the first.
+                cleaned = _PCT_CLAIM.sub("", reasoning).strip()
+                # Removing a sentence from the middle closes the gap it left, so
+                # restore the space the sentence separator used to carry.
+                cleaned = re.sub(r"([.!?])(?=[A-Za-z])", r"\1 ", cleaned)
+                if cleaned != reasoning:
+                    logger.info(
+                        "  dropped a percentage the model stated in the "
+                        "explanation row; the computed score stands"
+                    )
+                reasoning = cleaned
+                lines = [sentence, ""]
+                lines += [
+                    f"- {label}: {score:.0f}/100" + (f" — {basis}" if basis else "")
+                    for label, score, _, basis in breakdown
+                ]
+                if reasoning:
+                    lines += ["", reasoning]
+                values[row.number] = chr(10).join(lines)
+                break
+
     # The countdown was computed before the call, from the tracker's deadline,
     # because the model needed to know how long was left in order to answer. Now
     # that the pack has spoken, recompute it from whichever deadline actually
@@ -1006,10 +1158,21 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
     # measured from a different one, which is worse than either alone.
     _recompute_countdown(model, values, tracker_deadline, run_dt)
 
+    # The recommendation is prefixed with the qualification the score implies.
+    # The model writes the reasoning, the code states the verdict: left free, the
+    # two disagreed outright — a brief scoring 45% (LOW -> NoBid) closed with
+    # "Recommend bidding" on 2026-09-18.
     recommendation = ""
     for row in model.questions:
         if tpl._key(row.label) == "recommendation":
-            recommendation = values.get(row.number, "")
+            reasoning = values.get(row.number, "").strip()
+            if not scoring_failed:
+                verdict = tpl.LIKELIHOOD_QUALIFICATION.get(band, "TBD")
+                stated_verdict = f"{verdict} — {pct:.0f}% ({band})."
+                reasoning = (f"{stated_verdict} {reasoning}".strip()
+                             if reasoning else stated_verdict)
+                values[row.number] = reasoning
+            recommendation = reasoning
             break
 
     pack_docs = pack_docs if pack_docs is not None else TenderDocuments()
@@ -1029,6 +1192,9 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
                 )
                 break
 
+    if breakdown:
+        logger.info("  " + _breakdown_sentence(pct, breakdown, weights_source))
+
     logger.info(
         f"Brief complete: likelihood {pct:.0f}% ({band}), "
         f"{len(values)} row(s) answered ({len(asks) - len(missing)}/{len(asks)} "
@@ -1039,7 +1205,9 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
     return TenderBrief(
         values=values, more=more, generated_rows=generated_rows,
         likelihood_pct=pct, likelihood_band=band, recommendation=recommendation,
+        breakdown=breakdown, weights_source=weights_source,
         analysis_date=date_str, raw=result, documents=pack_docs, template=model,
+        analysis_failed=scoring_failed,
     )
 
 

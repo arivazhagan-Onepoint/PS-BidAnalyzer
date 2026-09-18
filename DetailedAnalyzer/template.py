@@ -199,6 +199,16 @@ def is_date_value(label: str) -> bool:
     return _key(label) in DATE_VALUED
 
 
+def is_likelihood_explanation_row(label: str) -> bool:
+    """True for the row that EXPLAINS the score, as opposed to stating it.
+
+    The mirror of is_likelihood_row's "explanation" exclusion: that row is the one
+    place the brief shows its arithmetic, so the code has to be able to find it.
+    """
+    text = (label or "").lower()
+    return "explanation" in text and "likelihood" in text
+
+
 def is_likelihood_row(label: str) -> bool:
     """True for the rows that state the likelihood itself.
 

@@ -327,6 +327,10 @@ def run(limit: int = None, dry_run: bool = False) -> dict:
             f"{brief.answered} row(s) answered; "
             f"{len(brief.documents.used)} document(s) in evidence"
         )
+        # The components behind the score, so a run is auditable from the log
+        # alone — the figure is now arithmetic, and arithmetic can be checked.
+        for label, score, weight, _ in brief.breakdown:
+            logger.info(f"      {label}: {score:.0f}/100 at {weight:.0f}% weight")
 
         # Roll the evidence base up for the email. A brief built without the
         # tender's pack is a weaker brief, and the run should say how many were.

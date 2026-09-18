@@ -72,6 +72,32 @@ DETAIL_MAX_TOKENS  = 16000
 # this longer task, raise it AND raise DETAIL_MAX_TOKENS so the output still fits.
 DETAIL_THINKING_BUDGET = 0
 
+# --- Scoring ------------------------------------------------------------------
+# The likelihood of winning is COMPUTED here, not answered. The model judges each
+# criterion and reports the weight the tender publishes for it; the total is
+# arithmetic done in _weighted_score(). Asking for the total directly gave a
+# number nobody could check: ten runs of row 542 on 2026-09-18, identical inputs,
+# ranged 30-65% and crossed the NoBid/TBD line in both directions.
+#
+# (key, label, default weight). The label is what the brief prints.
+SCORE_COMPONENTS = (
+    ("technical",    "Technical",    70),
+    ("commercial",   "Commercial",   20),
+    ("social_value", "Social Value", 10),
+)
+
+# Applied ONLY where the tender publishes no scoring matrix, and disclosed in the
+# brief when it is (user's decision, 2026-09-18). Equal thirds were considered and
+# rejected: they would let social value drive a third of every unweighted score,
+# which does not reflect how public IT work is actually evaluated.
+DEFAULT_WEIGHTS = {key: weight for key, _, weight in SCORE_COMPONENTS}
+
+# How far the tender's own published weights may sum from 100 and still be used.
+# A matrix read out of a document loses a percentage point to rounding or to a
+# sub-criterion this brief does not model; a set summing to 40 means the read
+# failed, and the defaults are safer than scoring on a third of the matrix.
+WEIGHT_SUM_TOLERANCE = 5
+
 # A model call can fail transiently (network blip, upstream 5xx, truncated reply
 # that fails JSON parsing). Retry before giving up.
 DETAIL_MAX_RETRIES   = 3
