@@ -26,14 +26,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Google Sheets/Drive:** `google-api-python-client` + `google-auth` (service-account auth).
 - **Email alerts:** Python standard library only (`smtplib` + `email`) via
   `notifier.py`; no extra dependency. Each run sends one HTML summary email.
-- **Other:** `requests`, `beautifulsoup4`, `pytz`, `holidays`.
 
 ## Run Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
 # From the project root:
 python -m analyzer.main                     # analyse every PreQualified/ReCheck row
 python -m analyzer.main --limit 5           # cap to the first 5 qualifying rows (quick test)
@@ -194,40 +190,12 @@ The sheet hyperlink sits between them. The sheet-wide figures are also written t
 the run log so a run is auditable without opening the email.
 
 Configuration lives in the `notifications` block of `project_config.json`
-(exposed as `config.NOTIFICATIONS`):
-
-```json
-"notifications": {
-  "enabled": true,
-  "smtp_host": "email-smtp.eu-west-1.amazonaws.com",
-  "smtp_port": 587,
-  "use_starttls": true,
-  "use_ssl": false,
-  "from_address": "ps-no-reply@onepointltd.com",
-  "recipients": ["arivazhagan.mani@onepointltd.com"]
-}
-```
+(exposed as `config.NOTIFICATIONS`).
 
 Set `"enabled": false` to disable alerts. SMTP auth (if the relay needs it) is
 read from `credentials/smtp_credentials.json`. `notifier.send_alert()` never
 raises — a broken mailer will not bring down an analysis run. This mirrors the
 notifier in the upstream **PS-WebScrapper** module.
-
-## Key Files
-
-| File | Role |
-|------|------|
-| `analyzer/main.py` | Entry point — read sheet → select → analyse → write back |
-| `analyzer/analyzer.py` | `analyze_tender()` — prompt, Gemini call, score → qualification |
-| `analyzer/maintain_knowledge.py` | Standalone knowledge maintenance — extract human decisions → distil heuristics |
-| `analyzer/patterns.py` | Loads the distilled Bid/NoBid precedent (cached per path, graceful when absent) |
-| `analyzer/gemini_client.py` | Native Gemini client wrapper (active provider) |
-| `analyzer/openrouter_client.py` | OpenRouter/OpenAI wrapper (backup, unused) |
-| `analyzer/onepoint_context.py` | Loads the Onepoint capability context |
-| `analyzer/sheets_client.py` | Google Sheets read/write + row colouring |
-| `analyzer/config.py` | Analyzer settings (provider/model, thresholds, retries, eligible statuses) |
-| `config.py` | Shared config — column schema, sheet/folder, credential paths, `NOTIFICATIONS` |
-| `notifier.py` | Stdlib SMTP email transport (`send_alert`); alert body built in `main.py` |
 
 ## Output
 

@@ -13,6 +13,8 @@ unfinished parts are visible in one file instead of scattered through the code.
 """
 import os
 import re
+from google.genai import types
+
 
 # Re-export all shared project configuration (DATASET_FIELDS, SHEET_NAME,
 # TARGET_FOLDER_ID, SCOPES, SERVICE_ACCOUNT_FILE, UK_TIMEZONE, CREDENTIALS_DIR,
@@ -67,10 +69,12 @@ DETAIL_MAX_TOKENS  = 16000
 
 # Gemini 3.x draw reasoning tokens from the same max_output_tokens budget, so
 # with thinking on the budget can be consumed before any JSON is emitted
-# (finish_reason=MAX_TOKENS) — the failure that forced the analyzer to 0. Start
-# at 0 here for the same reason. If richer reasoning turns out to be worth it for
-# this longer task, raise it AND raise DETAIL_MAX_TOKENS so the output still fits.
-DETAIL_THINKING_BUDGET = 0
+# (finish_reason=MAX_TOKENS) — the failure that forced the analyzer to 0. This
+# started at 0 here for the same reason; LOW buys some reasoning for a task this
+# long. Raise it further only alongside DETAIL_MAX_TOKENS, so the output still
+# fits. This is a ThinkingLevel, so it goes to ThinkingConfig(thinking_level=…),
+# NOT thinking_budget=… — that field is an int and rejects the enum outright.
+DETAIL_THINKING_BUDGET = types.ThinkingLevel.LOW
 
 # --- Scoring ------------------------------------------------------------------
 # The likelihood of winning is COMPUTED here, not answered. The model judges each

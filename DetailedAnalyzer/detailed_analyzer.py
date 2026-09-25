@@ -854,7 +854,7 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
                     max_output_tokens=DETAIL_MAX_TOKENS,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(
-                        thinking_budget=DETAIL_THINKING_BUDGET
+                        thinking_level=DETAIL_THINKING_BUDGET
                     ),
                 ),
             )
