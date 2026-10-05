@@ -9,6 +9,8 @@ the Onepoint capability context used to ground the analysis.
 """
 import os
 
+from google.genai import types
+
 # Re-export all shared project configuration (DATASET_FIELDS, SHEET_NAME,
 # TARGET_FOLDER_ID, SCOPES, SERVICE_ACCOUNT_FILE, UK_TIMEZONE, CREDENTIALS_DIR…)
 from config import *          # noqa: F401, F403
@@ -40,16 +42,15 @@ GEMINI_MODEL            = "gemini-3.1-flash-lite"
 
 # Model actually used by the analyzer.
 ANALYZER_MODEL       = GEMINI_MODEL
-ANALYZER_TEMPERATURE = 0.2
+ANALYZER_TEMPERATURE = 1.0
 ANALYZER_MAX_TOKENS  = 700
 
 # Gemini 3.x are "thinking" models: reasoning tokens are drawn from the same
-# max_output_tokens budget, so with thinking on the whole budget can be consumed
-# before any JSON is emitted (finish_reason=MAX_TOKENS). This is a short, well-
-# specified scoring task, so thinking is disabled (0) for reliable, cheap, fully
-# formed JSON. Raise it (e.g. 512, or -1 for dynamic) if richer reasoning is
-# wanted — but then also raise ANALYZER_MAX_TOKENS so output still fits.
-ANALYZER_THINKING_BUDGET = 0
+# max_output_tokens budget. LOW thinking provides some reasoning without consuming
+# the entire budget before output, balancing quality with reliable JSON completion.
+# Raise it (MEDIUM, HIGH, or -1 for dynamic) if richer reasoning is wanted — but
+# then also raise ANALYZER_MAX_TOKENS so output still fits.
+ANALYZER_THINKING_BUDGET = types.ThinkingLevel.LOW
 
 # A model call can fail transiently (network blip, upstream 5xx, an empty or
 # truncated reply that fails JSON parsing). These are usually transient, so retry
