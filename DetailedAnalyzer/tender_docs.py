@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import struct
 import zipfile
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
@@ -62,6 +63,7 @@ from .config import (
     TENDER_DOCS_IMPLIED_VERSION,
     TENDER_DOCS_WARN_UNRESOLVED,
     DOCX_MIME,
+    DOC_MIME,
     PDF_MIME,
     GDOC_MIME,
     XLSX_MIME,
@@ -281,6 +283,95 @@ def _pdf_text(data: bytes) -> str:
     return "\n".join(p for p in pages if p)
 
 
+def _doc_pieces(clx: bytes) -> list:
+    """(cp_start, cp_end, byte_offset, is_8bit) for each piece of a .doc's piece table.
+
+    The Clx is an optional run of property modifiers (0x01) followed by the piece
+    table (0x02). A piece maps a span of character positions onto the text stream;
+    a piece whose fc has bit 30 set holds one-byte cp1252 text at fc/2, otherwise
+    it is UTF-16LE at fc.
+    """
+    i = 0
+    while i < len(clx) and clx[i] == 0x01:
+        i += 3 + struct.unpack_from("<H", clx, i + 1)[0]
+    if i >= len(clx) or clx[i] != 0x02:
+        raise ValueError("no piece table in the .doc (corrupt or unsupported layout)")
+    lcb = struct.unpack_from("<I", clx, i + 1)[0]
+    plc = clx[i + 5:i + 5 + lcb]
+    n = (len(plc) - 4) // 12
+    cps = struct.unpack_from(f"<{n + 1}I", plc, 0)
+    pieces = []
+    for k in range(n):
+        fc = struct.unpack_from("<I", plc, 4 * (n + 1) + 8 * k + 2)[0]
+        compressed = bool(fc & 0x40000000)
+        offset = (fc & 0x3FFFFFFF) // 2 if compressed else fc & 0x3FFFFFFF
+        pieces.append((cps[k], cps[k + 1], offset, compressed))
+    return pieces
+
+
+def _doc_text(data: bytes) -> str:
+    """Body, footnote and header text of a Word 97-2003 .doc.
+
+    Text runs in character-position order: body, then footnotes, then headers and
+    footers — the same order `_docx_text` produces, so a reference number in a
+    header reaches the brief the same way from either format. Field codes keep
+    their displayed result and lose their instruction text. Requires olefile.
+    """
+    import olefile
+
+    with olefile.OleFileIO(io.BytesIO(data)) as ole:
+        word = ole.openstream("WordDocument").read()
+        if struct.unpack_from("<H", word, 0)[0] != 0xA5EC:
+            raise ValueError("not a Word 97-2003 document (bad FIB identifier)")
+        flags = struct.unpack_from("<H", word, 0x0A)[0]
+        table_name = "1Table" if flags & 0x0200 else "0Table"
+        table = ole.openstream(table_name).read()
+
+    # Ranges in FibRgLw97: text, footnotes, headers. Their sum is the stored story.
+    ccp_text, ccp_ftn, ccp_hdd = struct.unpack_from("<iii", word, 0x4C)
+    limit = ccp_text + ccp_ftn + ccp_hdd
+    fc_clx, lcb_clx = struct.unpack_from("<II", word, 0x1A2)
+    pieces = _doc_pieces(table[fc_clx:fc_clx + lcb_clx])
+
+    chunks = []
+    for cp0, cp1, offset, compressed in pieces:
+        start, end = max(cp0, 0), min(cp1, limit)
+        if start >= end:
+            continue
+        skip = start - cp0
+        if compressed:
+            raw = word[offset + skip:offset + skip + (end - start)]
+            chunks.append(raw.decode("cp1252", errors="replace"))
+        else:
+            raw = word[offset + 2 * skip:offset + 2 * (end - start + skip)]
+            chunks.append(raw.decode("utf-16-le", errors="replace"))
+    return _doc_plain("".join(chunks))
+
+
+def _doc_plain(raw: str) -> str:
+    """Word's control characters as plain text: paragraphs, cells, field results."""
+    out, in_instruction = [], False
+    for ch in raw:
+        if ch == "\x13":            # field begin: the instruction follows
+            in_instruction = True
+        elif ch == "\x14":          # field separator: the result follows
+            in_instruction = False
+        elif ch == "\x15":          # field end
+            continue
+        elif in_instruction or ch in "\x01\x03\x04\x05\x08\x1f":
+            continue                # field code, picture, story separator, note reference, optional hyphen
+        elif ch in "\r\x0b\x0c":    # paragraph, line break, page break
+            out.append("\n")
+        elif ch == "\x07":          # table cell end
+            out.append("\t")
+        elif ch == "\x1e":          # non-breaking hyphen
+            out.append("-")
+        else:
+            out.append(ch)
+    text = "".join(out)
+    return "\n".join(line.rstrip("\t") for line in text.split("\n")).strip()
+
+
 def _col_index(ref: str) -> int:
     """0-based column from a cell reference: A1 -> 0, B12 -> 1, AA3 -> 26."""
     letters = "".join(ch for ch in (ref or "") if ch.isalpha()).upper()
@@ -428,6 +519,8 @@ def extract_text(file_meta: dict) -> str:
     mime, file_id = file_meta["mimeType"], file_meta["id"]
     if mime == DOCX_MIME:
         return _docx_text(_download(file_id))
+    if mime == DOC_MIME:
+        return _doc_text(_download(file_id))
     if mime == PDF_MIME:
         return _pdf_text(_download(file_id))
     if mime == GDOC_MIME:

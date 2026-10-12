@@ -348,6 +348,11 @@ TENDER_DOCS_CACHE_DIR = os.path.join(KNOWLEDGE_DIR, "tender_docs")
 # canEdit but not canDelete/canTrash on that shared drive). Those leftovers would
 # then be re-ingested as tender documents on the next run.
 DOCX_MIME   = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+# Legacy binary Word (.doc, Word 97-2003). Read with olefile, which is why it is a
+# dependency and .docx is not: a binary OLE container cannot be read by hand from
+# the standard library. Packs still ship these — measured 2026-10 with a PME
+# briefing document that was otherwise unreadable.
+DOC_MIME    = "application/msword"
 PDF_MIME    = "application/pdf"
 GDOC_MIME   = "application/vnd.google-apps.document"
 # Spreadsheets are not optional: a pack ships its pricing schedule and its
@@ -356,7 +361,7 @@ GDOC_MIME   = "application/vnd.google-apps.document"
 # in scope on every run (see TENDER_DOCS_MAX_ATTEMPTS).
 XLSX_MIME   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 GSHEET_MIME = "application/vnd.google-apps.spreadsheet"
-TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, PDF_MIME, GDOC_MIME, XLSX_MIME, GSHEET_MIME)
+TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, DOC_MIME, PDF_MIME, GDOC_MIME, XLSX_MIME, GSHEET_MIME)
 
 # Total characters of pack text allowed into one prompt, across all documents.
 #

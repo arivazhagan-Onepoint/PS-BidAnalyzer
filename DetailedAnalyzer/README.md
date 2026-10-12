@@ -132,7 +132,7 @@ Three decisions here are behaviour, each measured on the real CITB pack
 
 | Decision | Why |
 |---|---|
-| Text comes from the **downloaded bytes** (`.docx` and `.xlsx` via stdlib `zipfile`+XML, `.pdf` via `pypdf`; native Google Docs and Sheets via their own APIs), never by converting a copy in Drive | Conversion works but takes ~29s/file against ~3s, and the copy lands in the customer's own folder where the service account holds `canEdit` but **not** `canDelete`/`canTrash`. The strays would then be re-ingested as tender documents on the next run |
+| Text comes from the **downloaded bytes** (`.docx` and `.xlsx` via stdlib `zipfile`+XML, legacy `.doc` via `olefile`, `.pdf` via `pypdf`; native Google Docs and Sheets via their own APIs), never by converting a copy in Drive | Conversion works but takes ~29s/file against ~3s, and the copy lands in the customer's own folder where the service account holds `canEdit` but **not** `canDelete`/`canTrash`. The strays would then be re-ingested as tender documents on the next run |
 | Superseded versions detected by **word 5-gram Jaccard ≥ 0.90**, not `difflib` | Measured: same document 0.9896, unrelated documents 0.0001–0.0011 — a ~900× margin, in 6ms. `difflib.ratio()` separates correctly but costs ~7 minutes across the pack; its cheap `quick_ratio()` scores two unrelated documents at 0.90 |
 | Which copy wins is the **filename version marker**, never a timestamp | Both timestamps are unusable here: `modifiedTime` is *identical* for the two ITTs, and `createdTime` has v2 created 1.5s **before** v1 — "newest wins" would confidently keep the stale document |
 
