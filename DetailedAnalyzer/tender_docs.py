@@ -64,6 +64,7 @@ from .config import (
     TENDER_DOCS_WARN_UNRESOLVED,
     DOCX_MIME,
     DOC_MIME,
+    XML_MIMES,
     PDF_MIME,
     GDOC_MIME,
     XLSX_MIME,
@@ -372,6 +373,51 @@ def _doc_plain(raw: str) -> str:
     return "\n".join(line.rstrip("\t") for line in text.split("\n")).strip()
 
 
+def _xml_text(data: bytes) -> str:
+    """Outline of a procurement questionnaire exported as XML (the `c4t` format).
+
+    These files are the buyer's scoring questionnaire, not prose: the content that
+    matters is the title, each section and criterion label with its weight, the
+    minimum score a criterion must reach, and the answer options. Those are
+    rendered as an indented outline. Anything else in the file is ignored rather
+    than dumped, so IDs, public keys and empty evaluator fields never reach the
+    brief.
+    """
+    root = ET.fromstring(data)
+    lines = []
+    title = (root.findtext("cft-title") or "").strip()
+    if title:
+        lines.append(f"Title: {title}")
+
+    def label_of(el):
+        return (el.findtext("label") or "").strip()
+
+    def walk(el, depth):
+        pad = "  " * depth
+        if el.tag == "section":
+            lines.append(f"{pad}Section: {label_of(el)} (weight {el.get('weight', '?')})")
+            for child in el:
+                walk(child, depth + 1)
+        elif el.tag == "criterion":
+            mandatory = "mandatory" if el.get("mandatory") == "1" else "optional"
+            lines.append(
+                f"{pad}Criterion: {label_of(el)} "
+                f"(weight {el.get('weight', '?')}, {mandatory})"
+            )
+            minimum = (el.findtext("threshold") or "").strip()
+            if minimum and minimum != "0":
+                lines.append(f"{pad}  minimum score {minimum}")
+            for option in el.iter("option"):
+                if (option.text or "").strip():
+                    lines.append(f"{pad}  option: {option.text.strip()}")
+        else:
+            for child in el:
+                walk(child, depth)
+
+    walk(root, 0)
+    return "\n".join(lines).strip()
+
+
 def _col_index(ref: str) -> int:
     """0-based column from a cell reference: A1 -> 0, B12 -> 1, AA3 -> 26."""
     letters = "".join(ch for ch in (ref or "") if ch.isalpha()).upper()
@@ -521,6 +567,8 @@ def extract_text(file_meta: dict) -> str:
         return _docx_text(_download(file_id))
     if mime == DOC_MIME:
         return _doc_text(_download(file_id))
+    if mime in XML_MIMES:
+        return _xml_text(_download(file_id))
     if mime == PDF_MIME:
         return _pdf_text(_download(file_id))
     if mime == GDOC_MIME:

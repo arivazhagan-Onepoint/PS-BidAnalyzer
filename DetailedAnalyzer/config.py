@@ -83,23 +83,20 @@ DETAIL_THINKING_BUDGET = types.ThinkingLevel.LOW
 # number nobody could check: ten runs of row 542 on 2026-09-18, identical inputs,
 # ranged 30-65% and crossed the NoBid/TBD line in both directions.
 #
-# (key, label, default weight). The label is what the brief prints.
+# (key, label). The label is what the brief prints. Where the tender publishes no
+# usable weighting matrix there are no default weights: the model's single
+# consolidated score across all criteria is used instead (user's decision,
+# 2026-10-14).
 SCORE_COMPONENTS = (
-    ("technical",    "Technical",    70),
-    ("commercial",   "Commercial",   20),
-    ("social_value", "Social Value", 10),
+    ("technical",    "Technical"),
+    ("commercial",   "Commercial"),
+    ("social_value", "Social Value"),
 )
-
-# Applied ONLY where the tender publishes no scoring matrix, and disclosed in the
-# brief when it is (user's decision, 2026-09-18). Equal thirds were considered and
-# rejected: they would let social value drive a third of every unweighted score,
-# which does not reflect how public IT work is actually evaluated.
-DEFAULT_WEIGHTS = {key: weight for key, _, weight in SCORE_COMPONENTS}
 
 # How far the tender's own published weights may sum from 100 and still be used.
 # A matrix read out of a document loses a percentage point to rounding or to a
 # sub-criterion this brief does not model; a set summing to 40 means the read
-# failed, and the defaults are safer than scoring on a third of the matrix.
+# failed, so it is treated as no matrix at all.
 WEIGHT_SUM_TOLERANCE = 5
 
 # A model call can fail transiently (network blip, upstream 5xx, truncated reply
@@ -353,6 +350,9 @@ DOCX_MIME   = "application/vnd.openxmlformats-officedocument.wordprocessingml.do
 # the standard library. Packs still ship these — measured 2026-10 with a PME
 # briefing document that was otherwise unreadable.
 DOC_MIME    = "application/msword"
+# Procurement questionnaires exported from a sourcing platform (the `c4t` scoring
+# format). Read by tender_docs._xml_text, which renders the outline, not the markup.
+XML_MIMES   = ("text/xml", "application/xml")
 PDF_MIME    = "application/pdf"
 GDOC_MIME   = "application/vnd.google-apps.document"
 # Spreadsheets are not optional: a pack ships its pricing schedule and its
@@ -361,7 +361,7 @@ GDOC_MIME   = "application/vnd.google-apps.document"
 # in scope on every run (see TENDER_DOCS_MAX_ATTEMPTS).
 XLSX_MIME   = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 GSHEET_MIME = "application/vnd.google-apps.spreadsheet"
-TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, DOC_MIME, PDF_MIME, GDOC_MIME, XLSX_MIME, GSHEET_MIME)
+TENDER_DOCS_SUPPORTED_MIMES = (DOCX_MIME, DOC_MIME, PDF_MIME, GDOC_MIME, XLSX_MIME, GSHEET_MIME, *XML_MIMES)
 
 # Total characters of pack text allowed into one prompt, across all documents.
 #

@@ -54,7 +54,6 @@ from .config import (
     UK_TIMEZONE,
     TENDER_DOCS_MANIFEST_FIELD,
     SCORE_COMPONENTS,
-    DEFAULT_WEIGHTS,
     WEIGHT_SUM_TOLERANCE,
 )
 from .gemini_client import get_client
@@ -85,9 +84,10 @@ class TenderBrief:
     likelihood_pct: float = 0.0
     likelihood_band: str = "LOW"
     # How the percentage was arrived at: one (label, score, weight, basis) per
-    # criterion, and whether the weights came from the tender or the defaults.
-    # Carried so the log, the email and the brief can all show the arithmetic —
-    # a score that cannot be taken apart cannot be argued with.
+    # category when the tender's weighting matrix was used, and the source
+    # ("tender", or "overall" for the model's consolidated score). Carried so the
+    # log, the email and the brief can all show the arithmetic — a score that
+    # cannot be taken apart cannot be argued with.
     breakdown: list = field(default_factory=list)
     weights_source: str = ""
     recommendation: str = ""
@@ -107,7 +107,7 @@ class TenderBrief:
         """One cell for the tracker: '82% (HIGH)'."""
         if self.analysis_failed:
             return "not scored — analysis failed"
-        return f"{self.likelihood_pct:.0f}% ({self.likelihood_band})"
+        return f"{pct_text(self.likelihood_pct)} ({self.likelihood_band})"
 
     @property
     def qualification_family(self) -> str:
@@ -497,7 +497,10 @@ pack is silent on that point:
     components = [
         f'    "{key}": {{"score": <0-100>, "weight_pct": <integer|null>, '
         f'"basis": …}},   <-- {label}'
-        for key, label, _ in SCORE_COMPONENTS
+        for key, label in SCORE_COMPONENTS
+    ] + [
+        '    "overall": {"score": <0-100>, "basis": …},   '
+        '<-- consolidated across ALL criteria'
     ]
 
     return f"""Onepoint capability context (use ONLY this to judge capability):
@@ -563,8 +566,11 @@ QUESTIONS
 {_questions_block(asks, generated, fallbacks)}
 
 Also give "assessment": Onepoint's standing on each criterion this tender is
-evaluated against. Do NOT give an overall score or name a band — the total is
-calculated from what you give here, so a total of your own would contradict it.
+evaluated against, and an "overall" score. Do NOT name a band. Where the tender
+publishes a weighting matrix, the total is calculated from the three category
+scores and their weights, and your "overall" figure is ignored. Where it publishes
+none, your "overall" score IS the total: judge Onepoint's standing across all of
+the tender's criteria taken together.
 
 For each criterion:
 - "score" 0-100 — how well Onepoint meets THAT criterion on the documented
@@ -926,7 +932,7 @@ def _weighted_score(result: dict) -> tuple:
         return None, [], ""
 
     scores, stated, bases = {}, {}, {}
-    for key, label, _ in SCORE_COMPONENTS:
+    for key, label in SCORE_COMPONENTS:
         entry = assessment.get(key)
         if not isinstance(entry, dict):
             logger.warning(f"  assessment is missing '{key}'; cannot score")
@@ -943,45 +949,61 @@ def _weighted_score(result: dict) -> tuple:
             stated[key] = None
         bases[key] = str(entry.get("basis", "") or "").strip()
 
-    # The tender's own weights win, exactly as its documents do everywhere else —
-    # but only as a complete, plausible set. A partial matrix would quietly drop
-    # whichever criterion the model failed to find a weight for.
+    # The tender's own weights, used only as a complete, plausible set. A partial
+    # matrix would quietly drop whichever criterion lacked a weight, so anything
+    # short of a full set counts as no matrix at all.
     total = sum(w for w in stated.values() if w is not None)
     if (all(w is not None for w in stated.values())
             and abs(total - 100.0) <= WEIGHT_SUM_TOLERANCE):
-        weights, source = stated, "tender"
+        pct = sum(scores[k] * stated[k] for k in scores) / total
+        breakdown = [
+            (label, scores[key], stated[key], bases[key])
+            for key, label in SCORE_COMPONENTS
+        ]
+        source = "tender"
     else:
-        weights = {k: float(v) for k, v in DEFAULT_WEIGHTS.items()}
-        source = "default"
+        # No usable matrix: the model's single consolidated score across all the
+        # criteria. No category weights are invented to produce it.
         if any(w is not None for w in stated.values()):
             logger.info(
                 f"  published weights unusable (sum {total:.0f}%); "
-                f"applying Onepoint defaults"
+                f"using the model's overall score"
             )
+        overall = assessment.get("overall")
+        try:
+            pct = max(0.0, min(100.0, float(overall.get("score"))))
+        except (AttributeError, TypeError, ValueError):
+            logger.warning("  no usable weighting matrix and no usable overall score")
+            return None, [], ""
+        breakdown = []
+        source = "overall"
+    # Two decimals is the precision the score is shown and banded at, so the
+    # figure a reader sees is the figure the band was taken from.
+    return round(max(0.0, min(100.0, pct)), 2), breakdown, source
 
-    divisor = sum(weights.values())
-    if divisor <= 0:
-        return None, [], ""
 
-    pct = sum(scores[k] * weights[k] for k in scores) / divisor
-    breakdown = [
-        (label, scores[key], weights[key], bases[key])
-        for key, label, _ in SCORE_COMPONENTS
-    ]
-    return max(0.0, min(100.0, pct)), breakdown, source
+def pct_text(pct: float) -> str:
+    """A likelihood as shown to the reader: up to two decimals, no trailing zeros.
+
+    74.5 reads "74.5%", 74 reads "74%". Shown at the precision it is banded at, so
+    the number and the band never disagree.
+    """
+    return f"{pct:.2f}".rstrip("0").rstrip(".") + "%"
 
 
 def _breakdown_sentence(pct: float, breakdown: list, source: str) -> str:
     """The arithmetic in words, for the brief's explanation row and the log."""
+    if source == "overall":
+        return (f"Consolidated score {pct_text(pct)}: the tender publishes no usable "
+                f"weighting matrix, so this is the overall judgement across all of "
+                f"its criteria.")
     parts = " + ".join(
         f"{label} {weight:.0f}% x {score:.0f}"
         for label, score, weight, _ in breakdown
     )
-    origin = ("weights from the tender's published scoring matrix"
-              if source == "tender"
-              else "the tender publishes no scoring matrix, so Onepoint's "
-                   "default weights are applied")
-    return f"Weighted score {pct:.0f}% = {parts}, divided by 100 ({origin})."
+    divisor = sum(weight for _, _, weight, _ in breakdown)
+    return (f"Weighted score {pct_text(pct)} = {parts}, divided by {divisor:.0f} "
+            f"(the tender's published weighting matrix).")
 
 
 # A sentence in which the model states an overall percentage of its own. The
@@ -1115,7 +1137,7 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
     # follow the number, or the brief contradicts itself. The current template
     # asks for the score in two places; both get the same string, so they cannot
     # disagree.
-    stated = f"{pct:.0f}% — {band}"
+    stated = f"{pct_text(pct)} — {band}"
     for row in model.questions:
         if tpl.is_likelihood_row(row.label):
             values[row.number] = stated
@@ -1124,7 +1146,7 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
     # Stated in code because it IS the calculation — a model asked to describe a
     # weighting it did not perform describes one that never happened (measured
     # 2026-09-18, where the brief cited weights against an unweighted score).
-    if breakdown:
+    if weights_source:
         sentence = _breakdown_sentence(pct, breakdown, weights_source)
         for row in model.questions:
             if tpl.is_likelihood_explanation_row(row.label):
@@ -1168,7 +1190,7 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
             reasoning = values.get(row.number, "").strip()
             if not scoring_failed:
                 verdict = tpl.LIKELIHOOD_QUALIFICATION.get(band, "TBD")
-                stated_verdict = f"{verdict} — {pct:.0f}% ({band})."
+                stated_verdict = f"{verdict} — {pct_text(pct)} ({band})."
                 reasoning = (f"{stated_verdict} {reasoning}".strip()
                              if reasoning else stated_verdict)
                 values[row.number] = reasoning
@@ -1192,11 +1214,11 @@ def _to_brief(result: dict, model, asks, generated, det_values: dict,
                 )
                 break
 
-    if breakdown:
+    if weights_source:
         logger.info("  " + _breakdown_sentence(pct, breakdown, weights_source))
 
     logger.info(
-        f"Brief complete: likelihood {pct:.0f}% ({band}), "
+        f"Brief complete: likelihood {pct_text(pct)} ({band}), "
         f"{len(values)} row(s) answered ({len(asks) - len(missing)}/{len(asks)} "
         f"from the model), {len(more)} second-column value(s), "
         f"{sum(len(v) for v in generated_rows.values())} generated row(s), "

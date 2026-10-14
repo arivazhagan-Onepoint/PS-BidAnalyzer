@@ -146,24 +146,17 @@ DERIVED_DATES = frozenset({
     _key("Contract Commencement"),
 })
 
-# The template spells the bands out inside its own labels. Transcribed here as
-# (label, low, high), inclusive, so the rendered band follows the percentage
-# rather than being named by the model.
+# The template spells the bands out inside its own labels. The band follows the
+# percentage rather than being named by the model.
 #
-# HIGH's floor is 76, NOT the 75 the template prints. The template's bands
-# disagreed with analyzer/config.py by exactly one point: there, score > 75 is
-# Bid, so 75 is TBD. A tender landing on 75 would have read "HIGH likelihood —
-# Bid" in this brief and "TBD" in the tracker at the same time. Reconciled here
-# rather than in the analyzer, on the user's decision (2026-08-21), because
-# moving the analyzer's threshold would have made every future qualification one
-# point more generous — and Bid is the expensive direction to cross by mistake,
-# whereas TBD stays recoverable via ReCheck.
-LIKELIHOOD_BANDS = (
-    ("VERY HIGH", 90, 100),
-    ("HIGH",      76, 89),
-    ("MEDIUM",    51, 75),
-    ("LOW",        0, 50),
-)
+# The cut-offs are the analyzer's own (analyzer/config.py): Bid is strictly ABOVE
+# 75, TBD runs 51-75 inclusive, NoBid is below 51. So a score of 75 is TBD and
+# 75.5 is Bid, exactly as in the analyzer. Measured 2026-10-14: the earlier
+# integer ranges left every fraction between them (75.5, 89.5, 50.5) in no band,
+# which fell through to LOW and NoBid. Comparing with open and closed ends
+# covers every value. Moving the analyzer's threshold would have made every
+# future qualification one point more generous; matching it here keeps the two
+# stages agreeing.
 LIKELIHOOD_QUALIFICATION = {
     "VERY HIGH": "Bid",
     "HIGH":      "Bid",
@@ -175,9 +168,12 @@ LIKELIHOOD_QUALIFICATION = {
 def band_for(percentage: float) -> str:
     """The template's likelihood band label for a 0-100 percentage."""
     pct = max(0.0, min(100.0, float(percentage)))
-    for label, low, high in LIKELIHOOD_BANDS:
-        if low <= pct <= high:
-            return label
+    if pct >= 90:
+        return "VERY HIGH"
+    if pct > 75:
+        return "HIGH"
+    if pct >= 51:
+        return "MEDIUM"
     return "LOW"
 
 
