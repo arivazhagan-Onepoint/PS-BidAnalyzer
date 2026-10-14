@@ -47,6 +47,8 @@ from google.genai import types
 from .config import (
     DETAIL_MODEL,
     DETAIL_TEMPERATURE,
+    DETAIL_TOP_P,
+    DETAIL_TOP_K,
     DETAIL_MAX_TOKENS,
     DETAIL_THINKING_BUDGET,
     DETAIL_MAX_RETRIES,
@@ -312,11 +314,12 @@ def _timeline_block(computed: dict) -> str:
     if "deadline has passed" in computed.get("urgency status", "").lower():
         lines.append(
             "THIS TENDER'S SUBMISSION DEADLINE HAS ALREADY PASSED. It cannot be "
-            "bid. Say so plainly in the recommendation, and set the likelihood of "
-            "winning to 0 — a closed tender cannot be won, however good the fit "
-            "would have been. Still complete the rest of the brief: it is useful "
-            "as a record of what was missed and of Onepoint's fit for work of "
-            "this kind."
+            "bid. Say so plainly in the recommendation. The timing is reported "
+            "separately and does NOT change any score: give the criterion scores "
+            "and the overall score as you would for an open tender, judging only "
+            "Onepoint's fit for the work. Still complete the rest of the brief: it "
+            "is useful as a record of what was missed and of Onepoint's fit for "
+            "work of this kind."
         )
     return "\n".join(lines)
 
@@ -566,7 +569,9 @@ QUESTIONS
 {_questions_block(asks, generated, fallbacks)}
 
 Also give "assessment": Onepoint's standing on each criterion this tender is
-evaluated against, and an "overall" score. Do NOT name a band. Where the tender
+evaluated against, and an "overall" score. Score fit only: the submission deadline,
+the countdown and the timeline are reported separately, so do not raise or lower
+any score for them. Do NOT name a band. Where the tender
 publishes a weighting matrix, the total is calculated from the three category
 scores and their weights, and your "overall" figure is ignored. Where it publishes
 none, your "overall" score IS the total: judge Onepoint's standing across all of
@@ -857,6 +862,8 @@ def analyse_tender_detail(tender_data: dict, run_date: datetime = None,
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM_PROMPT,
                     temperature=DETAIL_TEMPERATURE,
+                    top_p=DETAIL_TOP_P,
+                    top_k=DETAIL_TOP_K,
                     max_output_tokens=DETAIL_MAX_TOKENS,
                     response_mime_type="application/json",
                     thinking_config=types.ThinkingConfig(

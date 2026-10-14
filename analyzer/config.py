@@ -43,7 +43,9 @@ GEMINI_MODEL            = "gemini-3.1-flash-lite"
 # Model actually used by the analyzer.
 ANALYZER_MODEL       = GEMINI_MODEL
 ANALYZER_TEMPERATURE = 1.0
-ANALYZER_MAX_TOKENS  = 700
+ANALYZER_TOP_P       = 0.95
+ANALYZER_TOP_K       = 64
+ANALYZER_MAX_TOKENS  = 2000   # was 700: LOW thinking shares this budget, and 700 truncated replies
 
 # Gemini 3.x are "thinking" models: reasoning tokens are drawn from the same
 # max_output_tokens budget. LOW thinking provides some reasoning without consuming

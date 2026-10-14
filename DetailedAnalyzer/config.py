@@ -51,6 +51,8 @@ GEMINI_MODEL            = "gemini-3.1-flash-lite"
 
 DETAIL_MODEL       = GEMINI_MODEL
 DETAIL_TEMPERATURE = 1.0
+DETAIL_TOP_P       = 0.95
+DETAIL_TOP_K       = 64
 # Far larger than the analyzer's 700: that call returns a score plus 2-4
 # sentences, this one returns a multi-section written assessment.
 #

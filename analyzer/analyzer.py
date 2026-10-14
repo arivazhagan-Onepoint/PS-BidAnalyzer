@@ -20,6 +20,8 @@ from google.genai import types
 from .config import (
     ANALYZER_MODEL,
     ANALYZER_TEMPERATURE,
+    ANALYZER_TOP_P,
+    ANALYZER_TOP_K,
     ANALYZER_MAX_TOKENS,
     ANALYZER_THINKING_BUDGET,
     ANALYZER_MAX_RETRIES,
@@ -152,13 +154,15 @@ def analyze_tender(title: str, description: str, run_date: datetime = None,
                 config=types.GenerateContentConfig(
                     system_instruction=_SYSTEM_PROMPT,
                     temperature=ANALYZER_TEMPERATURE,
+                    top_p=ANALYZER_TOP_P,
+                    top_k=ANALYZER_TOP_K,
                     max_output_tokens=ANALYZER_MAX_TOKENS,
                     # Ask Gemini for raw JSON so the reply parses cleanly.
                     response_mime_type="application/json",
                     # Thinking tokens share the output budget on Gemini 3.x; keep
                     # them bounded so the JSON always fits (see config note).
                     thinking_config=types.ThinkingConfig(
-                        thinking_budget=ANALYZER_THINKING_BUDGET
+                        thinking_level=ANALYZER_THINKING_BUDGET
                     ),
                 ),
             )

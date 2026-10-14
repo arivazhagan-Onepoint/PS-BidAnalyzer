@@ -193,10 +193,17 @@ def run(limit: int = None) -> dict:
 
         updates.append((tender.row, _build_row_update(tender, analysis, run_dt)))
         new_status[tender.row] = analysis.bid_qualification
-        summary["analysed"] += 1
-        # Count by family so 'Bid(AI)' etc. roll up under Bid/TBD/NoBid.
-        family = qualification_family(analysis.bid_qualification) or analysis.bid_qualification
-        summary[family] = summary.get(family, 0) + 1
+        # A flagged result is a failure to score, not an assessment. The row still
+        # takes the TBD placeholder so the team can see it, but the run counts it as
+        # an error, so the alert is amber and not a green SUCCESS.
+        if analysis.analysis_failed:
+            logger.error(f"Row {tender.row}: analysis failed; recorded as {analysis.bid_qualification}")
+            summary["errors"] += 1
+        else:
+            summary["analysed"] += 1
+            # Count by family so 'Bid(AI)' etc. roll up under Bid/TBD/NoBid.
+            family = qualification_family(analysis.bid_qualification) or analysis.bid_qualification
+            summary[family] = summary.get(family, 0) + 1
         # Colour the row we're changing, reusing the project's palette.
         color = status_color(analysis.bid_qualification)
         if color:
