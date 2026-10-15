@@ -44,6 +44,9 @@ project_config.json ──▶ SheetsClient.read_tenders()
 | `sources.py` | **Ingestion layer** — reads Onepoint's Drive source sheets, strips PII, renders the corpus. Own entry point. |
 | `tender_docs.py` | **The tender's own pack** — finds its Drive folder by OCID, extracts the documents, drops superseded versions, caps the total. |
 | `main.py` | Orchestration: read sheet → select → analyse → write back → email. Entry point. |
+| `template_reader.py` | Reads the published Bid Analyser Reporting Template each run and builds the question list from it. Row colours and yellow instruction rows set what is asked. |
+| `template.py` | What the template cannot say: tracker mappings, likelihood bands and cut-offs, and the countdown. |
+| `report_writer.py` | Copies the template per tender into the reports folder, fills it by row number, and wraps the result. |
 | `detailed_analyzer.py` | Core `analyse_tender_detail()` — prompt, Gemini call, retries, result. |
 | `config.py` | Model budget, scope, output mapping, write-back switch. Re-exports the root `config.py`. |
 | `gemini_client.py` | Native Gemini client wrapper (own copy, so the two stages stay independent). |
@@ -136,6 +139,11 @@ Three decisions here are behaviour, each measured on the real CITB pack
 | Superseded versions detected by **word 5-gram Jaccard ≥ 0.90**, not `difflib` | Measured: same document 0.9896, unrelated documents 0.0001–0.0011 — a ~900× margin, in 6ms. `difflib.ratio()` separates correctly but costs ~7 minutes across the pack; its cheap `quick_ratio()` scores two unrelated documents at 0.90 |
 | Which copy wins is the **filename version marker**, never a timestamp | Both timestamps are unusable here: `modifiedTime` is *identical* for the two ITTs, and `createdTime` has v2 created 1.5s **before** v1 — "newest wins" would confidently keep the stale document |
 
+**Questionnaires.** A procurement questionnaire exported as XML (the `c4t` format) is read as an
+outline of its sections, criteria, weights, minimum scores and answer options. IDs, public keys
+and evaluator fields are left out. The CMDB pack's questionnaire comes out at 949 characters from
+a 2.8 KB file.
+
 Where no marker separates two copies, **both are kept and the run warns** rather
 than a coin being flipped on contract terms — the same refusal to guess as
 `report_writer._prefix_match`.
@@ -209,6 +217,22 @@ run log recorded the gap.
 Log: `DetailedAnalyzer/detailed_analyzer.log` (also echoed to console). Covered
 by the root `.gitignore`'s `*.log`.
 
+## Scoring
+
+The likelihood percentage is computed in code (`_weighted_score` in `detailed_analyzer.py`), never
+taken from the model's own total.
+
+- **Tender matrix:** if the tender publishes Technical, Commercial and Social Value weights that
+  sum to 100 ±5, the score is the weighted average of the three category scores.
+- **Consolidated:** otherwise the score is the model's single `overall` figure across all
+  criteria. No category weights are invented. If neither is usable, the row is recorded as not
+  scored, not as 0%.
+- **Bands** (the same cut-offs as the analyzer): Bid strictly above 75, TBD 51–75 inclusive,
+  NoBid below 51. Scores are kept to two decimals and shown at that precision, so the figure a
+  reader sees is the figure that was banded.
+- **Deadline:** a passed submission deadline is reported in the brief and the recommendation
+  says the tender cannot be bid. It does not change any score.
+
 ## What it deliberately does not do
 
 - **Never writes `Bid Qualification Reason(Human)`.** The team's manual notes are
@@ -242,6 +266,13 @@ workflow status has to be what advances it.
    which costs three retries and then yields a TBD.
 4. **`main()` emails on `--dry-run` too.** Call `run()` directly to test without
    mailing anyone.
+5. **Scores vary between runs.** On the CMDB tender, ten repeat runs after the deadline change
+   ranged 72–83%, which straddles the 75 Bid/TBD line. The model's consolidated score is the
+   least stable input; the category scores are steadier.
+6. **Closed tenders still get a verdict.** A tender whose deadline has passed still implies
+   Bid or TBD from its score. Whether it should be forced to NoBid or "Closed" is undecided.
+7. **The verdict is not in the tracker's Bid Qualification column.** It is in the brief. A tender
+   can show `Bid(AI)` from the analyzer and a TBD brief from this stage.
 
 One constraint worth keeping through all of that: capability claims are grounded
 **only** on `onepoint_capabilities.md` — the same wall the analyzer enforces. The

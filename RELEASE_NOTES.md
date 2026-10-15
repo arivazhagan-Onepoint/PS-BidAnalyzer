@@ -35,6 +35,42 @@
 - The existing per-run metrics table is now headed **Bid Analysis - This Run**.
 - Sheet-wide totals are also written to the run log.
 
+### DetailedAnalyzer — second-stage written brief (new module)
+- New `DetailedAnalyzer` runs on rows set to `Docs-Ready`. It completes the **Bid Analyser Reporting Template** for each tender: a copy per tender in Drive, filled in row by row, with the outcome written back to the tracker and the row moved to `Analysis-Complete` (which takes it out of scope).
+- The template drives the question list. Its colours and yellow instruction rows set what is asked; new sections, reworded instructions and "expand" tables need no code change.
+- **Tender pack evidence.** Each tender's own documents are read, matched by OCID: `.docx`, `.doc` (legacy Word), `.pdf`, `.xlsx`, Google Docs and Sheets, and XML procurement questionnaires (rendered as an outline of sections, criteria, weights and minimum scores). Pack documents outrank the tracker, which is used only as a fallback. Superseded versions are resolved, and an unreadable document is recorded on the row.
+- **Website corpus.** Onepoint's public site pages are ingested as supporting evidence, by allowlist.
+- **Likelihood is computed in code, not answered by the model.**
+  - Where the tender publishes a complete weighting matrix (weights sum to 100 ±5), the score is the weighted average of Technical, Commercial and Social Value.
+  - Where it publishes none, the score is the model's single consolidated score across all criteria. There are no default category weights.
+  - If neither is usable, the row is recorded as not scored, not as 0%.
+- **Bands** (same cut-offs as the analyzer): Bid strictly above 75, TBD 51–75 inclusive, NoBid below 51. Scores are kept to two decimals and shown at that precision, so the displayed figure is the one banded.
+- **A passed submission deadline no longer changes the score.** It is reported in the brief and the recommendation says the tender cannot be bid. The earlier instruction to set the likelihood to 0 was removed.
+- **Sampling** is set to temperature 1.0, `top_p` 0.95, `top_k` 64 (the same `top_p`/`top_k` values are used in the analyzer).
+
+**Known issues (DetailedAnalyzer):**
+- Scores still vary between runs on the same tender. Ten repeat runs on one tender after the deadline change ranged 72–83%, which straddles the 75 Bid/TBD line, so the verdict can flip between runs.
+- The verdict is written to the brief, not to the tracker's Bid Qualification column. A tender can show `Bid(AI)` on the tracker and a `TBD` brief in the reports folder.
+- A tender with a passed deadline still implies a Bid/TBD verdict from its score. Whether a closed tender should be forced to NoBid or "Closed" is undecided.
+
+### Analyzer — scoring fixes
+- **Scoring calls were failing.** The thinking setting was passed as an integer budget, but it is a `ThinkingLevel` enum (`thinking_level=`). Every scoring call from `23f7bce` onward would have failed, and each row would have been recorded as `TBD(AI)` with "not scored — analysis failed". The local log has no runs after 5 October, so it can't show whether any production run was affected; check the alert history for October.
+- **Output budget raised from 700 to 2,000 tokens.** LOW thinking draws from the same budget, and 700 was truncating replies with `MAX_TOKENS`.
+- **Failed scores now count as errors.** A flagged failure was previously counted as "analysed", so a run where every scoring call failed reported `Errors 0` and a green SUCCESS email. The row is still written as `TBD(AI)` and coloured, but the run now reports `COMPLETED WITH ERRORS`.
+- **Sampling** is set to `top_p` 0.95 and `top_k` 64.
+
+**Known issues (Analyzer):**
+- A failed row is recorded as `TBD(AI)`, which is outside the analyzer's scope, so it is not retried automatically. Set the row back to `ReCheck` to retry it.
+- Alert emails are not delivered while AWS SES sending is paused for the account. The notifier logs the error and does not raise, so the run still exits as successful.
+
+### Tender-pack readers
+- `.doc` (Word 97–2003) files are read with `olefile` (new dependency, pinned in `requirements.txt`). Body, footnote and header text is extracted in document order, and field instructions are dropped while their results are kept. Checked against `antiword` on a real file: 97% word-level agreement.
+- XML procurement questionnaires are read as an outline (see above).
+
+### Documentation
+- `CLAUDE.md` corrected: the thinking setting is now LOW, and a failed analysis needs `ReCheck` to retry.
+- The "Email notifications" detail moved to a skill, `.claude/skills/email-notifications/SKILL.md`, to keep it out of the always-loaded context. The rule that the notifier never raises stays in `CLAUDE.md`.
+
 ---
 
 ## v1.1.0 — 2026-07-22

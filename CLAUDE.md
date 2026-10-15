@@ -17,8 +17,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Language:** Python 3.10+ (developed on 3.14)
 - **LLM (active):** Google **Gemini** via the native `google-genai` SDK.
   Model is `gemini-3.1-flash-lite` (`GEMINI_MODEL` in `analyzer/config.py`).
-  Thinking is disabled (`ANALYZER_THINKING_BUDGET = 0`) because Gemini 3.x draws
-  reasoning tokens from the output budget, which truncated the JSON reply.
+  Thinking is LOW (`ANALYZER_THINKING_BUDGET`, passed as `thinking_level`), with a
+  2,000-token output budget (`ANALYZER_MAX_TOKENS`), because LOW thinking draws from
+  the same budget as the JSON reply.
 - **LLM (backup, not used):** **OpenRouter** via the `openai` SDK. The wrapper
   (`analyzer/openrouter_client.py`) and its `OPENROUTER_*` settings are retained
   for reference only; nothing in the active path imports them. There is **no
@@ -73,9 +74,10 @@ Entry point is `analyzer/main.py`, which orchestrates one run:
    **single entry point**, applied once before the loop (`should_analyse()`), so
    manual overrides and already-qualified rows are dropped there and never reach
    the loop, the model, or the per-row log. **There is no date filter** — a row
-   stays in scope until it has a qualification, so one missed by a failed or
-   skipped run is picked up by the next. Nothing bounds run size except `--limit`,
-   which is manual; see the note in `analyzer/config.py`.
+   stays in scope until it has a qualification, so one missed by a skipped run
+   is picked up by the next. A failed analysis is written as `TBD(AI)`, which takes
+   the row out of scope; set it back to `ReCheck` to retry. Nothing bounds run size
+   except `--limit`, which is manual; see the note in `analyzer/config.py`.
 3. `analyzer.py` — `analyze_tender(title, description, nobid_patterns=…, bid_patterns=…)`
    builds a prompt from the Onepoint context (`onepoint_context.py`) plus the
    distilled decision precedent (`patterns.py`, loaded once per run in `main.py`),
@@ -163,39 +165,9 @@ poor-fit tenders show no difference either way and prove nothing.
 
 ## Email notifications
 
-Every run sends exactly one HTML summary email, colour-coded by outcome:
-
-- ✅ **SUCCESS** (green) — run completed with zero row errors.
-- ⚠️ **COMPLETED WITH ERRORS** (amber) — run finished but ≥1 row hit an
-  analyzer error (`summary['errors'] > 0`).
-- ❌ **FAILURE** (red) — the run aborted with an exception; the email embeds the
-  traceback and the process still exits non-zero (so schedulers register it).
-
-The body reports environment, start/finish times and the run's scope (every row
-awaiting qualification), then two tables:
-
-- **Overall Summary** — sheet-wide Bid and TBD totals across *every* row in the
-  tracker (not just this run), rolled up by qualification family so `Bid(AI)`,
-  `Bid(Human)` and bare `Bid` count together, plus a "Tenders Needing your
-  Attention" total. Counted in `run()` off the rows already read — no extra API
-  call — with this run's new qualifications substituted in so the totals reflect
-  the sheet after write-back. Omitted entirely on a fatal error, where no totals
-  were produced (better than showing a misleading 0).
-- **Bid Analysis - This Run** — the per-run metrics (Eligible / Analysed / Bid /
-  TBD / NoBid / Skipped / Errors). `Eligible` leads because it is the run's scope;
-  `Analysed` below it shows how much of that scope was got through, the two
-  differing when `--limit` is set or a row has no title/description.
-
-The sheet hyperlink sits between them. The sheet-wide figures are also written to
-the run log so a run is auditable without opening the email.
-
-Configuration lives in the `notifications` block of `project_config.json`
-(exposed as `config.NOTIFICATIONS`).
-
-Set `"enabled": false` to disable alerts. SMTP auth (if the relay needs it) is
-read from `credentials/smtp_credentials.json`. `notifier.send_alert()` never
-raises — a broken mailer will not bring down an analysis run. This mirrors the
-notifier in the upstream **PS-WebScrapper** module.
+Detail is in `.claude/skills/email-notifications/SKILL.md`. Every run sends exactly
+one HTML summary email. `notifier.send_alert()` never raises — a broken mailer
+will not bring down an analysis run.
 
 ## Output
 
