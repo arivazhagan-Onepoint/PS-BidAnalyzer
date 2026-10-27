@@ -4,8 +4,14 @@ Dumps the exact prompts each analysis stage sends to Gemini, to files.
 Both stages assemble their prompt at call time from a private ``_build_prompt()``
 plus whichever knowledge files are present, so the only faithful way to see what
 the model actually receives is to call those builders. This script does that — and
-nothing else: it never calls Gemini, never touches Sheets or Drive, and writes
+nothing else: it never calls Gemini and never writes to Sheets or Drive, and writes
 only into ``prompts/``.
+
+The one network read is the DetailedAnalyzer's reporting template, which is
+published in Drive and is the structure the brief is built from. It is read with
+the same read-only call a real run makes; there is no local copy to use instead.
+The per-tender document pack is NOT read (it means downloading the buyer's files),
+so it is shown as a marker in its place.
 
 Two views per stage, because the injected knowledge dwarfs the instructions
 (capability context ~13 KB, the detailed corpus ~168 KB):
@@ -35,6 +41,7 @@ from analyzer.patterns import load_nobid_patterns, load_bid_patterns
 
 from DetailedAnalyzer import detailed_analyzer as detail
 from DetailedAnalyzer import config as detail_config
+from DetailedAnalyzer import template_reader as tr
 from DetailedAnalyzer.sources import load_corpus
 
 from config import UK_TIMEZONE
@@ -159,7 +166,14 @@ def dump_analyzer(run_dt: datetime):
 
 
 def dump_detailed_analyzer(run_dt: datetime):
-    """DetailedAnalyzer.analyse_tender_detail() — the full qualification brief."""
+    """DetailedAnalyzer.analyse_tender_detail() — the full qualification brief.
+
+    Follows analyse_tender_detail() step for step up to the model call: the
+    template's questions are planned, the tracker- and clock-filled rows are
+    computed, and the prompt comes from the real _build_prompt(). Only the
+    per-tender pack is substituted, with a marker.
+    """
+    model = tr.load_template_model()
     context = detail.load_onepoint_context()
     corpus = load_corpus()
 
@@ -168,9 +182,12 @@ def dump_detailed_analyzer(run_dt: datetime):
     row = dict(SAMPLE_TENDER)
     row["Tender Due Date"] = (run_dt + timedelta(days=21)).strftime("%Y-%m-%d")
 
+    title = row["Name"]
+    description = row["Tender Description"]
     facts = detail._format_tender_facts(row)
-    deterministic = detail._deterministic_fields(row, run_dt)
-    timeline = detail._timeline_block(deterministic)
+    det_values, _, computed, fallbacks = detail._fill_deterministic(model, row, run_dt)
+    asks, generated = detail._plan(model, set(det_values))
+    timeline = detail._timeline_block(computed)
 
     # The tender pack is per-tender and read from Drive at run time, so there is
     # nothing local to expand it from. Both views therefore carry a marker in its
@@ -183,6 +200,8 @@ def dump_detailed_analyzer(run_dt: datetime):
         f"    matched on {detail_config.TENDER_DOCS_MATCH_FIELD}); a document trimmed to\n"
         "    fit the analysis budget carries an explicit truncation note >>>"
     )
+    # Mirrors the no-pack note in analyse_tender_detail(); the wording is duplicated
+    # here because that note is inline in the run, not a module constant.
     pack_absent_note = (
         "No tender pack was available for this tender — no documents have been "
         "uploaded for it, so this assessment rests on the tender summary above "
@@ -190,6 +209,13 @@ def dump_detailed_analyzer(run_dt: datetime):
         "documents (evaluation weightings, mandatory requirements, contractual "
         "terms) rather than inferring an answer."
     )
+
+    # The branch the run takes when the deadline has already passed: the same
+    # tracker row, dated 22 days before the dump, through the real timeline code.
+    past = dict(row)
+    past["Tender Due Date"] = (run_dt - timedelta(days=22)).strftime("%Y-%m-%d")
+    _, _, past_computed, _ = detail._fill_deterministic(model, past, run_dt)
+    expired_timeline = detail._timeline_block(past_computed)
 
     settings = (
         f"model={detail_config.DETAIL_MODEL}  temperature={detail_config.DETAIL_TEMPERATURE}  "
@@ -204,44 +230,42 @@ def dump_detailed_analyzer(run_dt: datetime):
             "                              [stage 2: qualification brief]",
             f"View      : {view}",
             "Built by  : DetailedAnalyzer/detailed_analyzer.py — _SYSTEM_PROMPT, _build_prompt()",
-            "            JSON field list emitted from DetailedAnalyzer/template.py",
+            "            questions read from the published reporting template by",
+            "            DetailedAnalyzer/template_reader.py (read-only)",
             f"Settings  : {settings}",
             f"Generated : {run_dt:%Y-%m-%d %H:%M %Z} from the sample tender in dump_prompts.py",
             "Note      : generated file — change the prompt in DetailedAnalyzer/detailed_analyzer.py.",
         ]
 
     expanded = detail._build_prompt(
-        row["Name"], row["Tender Description"], facts, context,
-        corpus, timeline, pack_marker, "",
+        model, asks, generated, title, description, facts, context,
+        corpus, timeline, pack_marker, "", fallbacks,
     )
     skeleton = detail._build_prompt(
-        row["Name"], row["Tender Description"], facts,
+        model, asks, generated, title, description, facts,
         _marker(detail_config.ONEPOINT_CONTEXT_FILE, context,
                 "ONEPOINT CAPABILITY CONTEXT — shared with stage 1, hand-authored"),
         _marker(detail_config.CORPUS_FILE, corpus,
                 "ONEPOINT SOURCE CORPUS — built by DetailedAnalyzer.sources"),
-        timeline, pack_marker, "",
+        timeline, pack_marker, "", fallbacks,
     )
 
-    # The branches the builders can take that the prompt above does not show.
-    expired = dict(deterministic)
-    expired["Time Remaining"] = "Deadline passed 22 day(s) ago (05/08/2026)"
-    expired["Urgency Status"] = detail.URGENCY_BANDS[0][1]
     branches = (
         "1. NO TENDER PACK — when no documents have been uploaded for the tender, "
         "the whole pack block above (heading, the 'THE PACK WINS' instruction and "
         "all) is replaced by this single paragraph:\n\n"
         f"{pack_absent_note}\n\n"
-        "2. DEADLINE ALREADY PASSED — _timeline_block() appends a fourth line to "
-        "the Timeline section, making it read:\n\n"
-        f"{detail._timeline_block(expired)}\n\n"
+        "2. DEADLINE ALREADY PASSED — _timeline_block() appends a further line to "
+        "the timeline, making it read:\n\n"
+        f"{expired_timeline}\n\n"
         "3. The corpus block is omitted entirely when the corpus has never been "
         "built. The capability block is always present, degrading to "
         "'(No Onepoint capability context provided.)'.\n\n"
-        "4. The deterministic template rows (submission deadline, client name, "
-        "reference, location, time remaining, urgency) are filled from the tracker "
-        "row and the clock, never asked of the model — which is why they are absent "
-        "from the JSON field list above."
+        "4. The tracker- and clock-filled rows (submission deadline, client name, "
+        "reference, location, time remaining, urgency) are never asked of the model, "
+        "so they are absent from the question list above. Where the tender pack "
+        "outranks the tracker, the tracker value appears only as a fallback beside "
+        "its question."
     )
 
     for filename, view, prompt in (
