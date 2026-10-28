@@ -74,6 +74,7 @@ from .config import (
 logger = logging.getLogger(__name__)
 
 # Word namespace in a .docx's document.xml.
+FOLDER_MIME = "application/vnd.google-apps.folder"
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 # SpreadsheetML namespaces, for .xlsx. Same trick as .docx — the file is a zip of
@@ -209,8 +210,19 @@ def find_tender_folder(ocid: str) -> dict:
     return matches[0]
 
 
-def list_documents(folder_id: str) -> list:
-    """Every file directly in a tender's folder, with the metadata we fingerprint."""
+def list_documents(folder_id: str, prefix: str = "", warnings: list = None,
+                   _seen: set = None) -> list:
+    """Every file under a tender's folder, subfolders included, recursively.
+
+    A file's name carries its path from the tender folder ("Annexes/Pricing.xlsx"),
+    so the manifest and the prompt show where each document came from. Folder
+    entries are containers, not documents, and are not returned. A subfolder that
+    cannot be listed is recorded in ``warnings`` and skipped, so one unreadable
+    subfolder does not cost the rest of the pack. ``_seen`` stops a folder being
+    visited twice.
+    """
+    seen = set() if _seen is None else _seen
+    seen.add(folder_id)
     files, page = [], None
     while True:
         res = _drive_service().files().list(
@@ -222,7 +234,20 @@ def list_documents(folder_id: str) -> list:
             supportsAllDrives=True,
             includeItemsFromAllDrives=True,
         ).execute()
-        files.extend(res.get("files", []))
+        for item in res.get("files", []):
+            if item["mimeType"] != FOLDER_MIME:
+                files.append({**item, "name": f"{prefix}{item['name']}"})
+                continue
+            if item["id"] in seen:
+                continue
+            try:
+                files.extend(list_documents(
+                    item["id"], f"{prefix}{item['name']}/", warnings, seen))
+            except (HttpError, OSError) as e:
+                msg = f"Could not list subfolder '{prefix}{item['name']}': {e}"
+                logger.warning(f"  {msg}")
+                if warnings is not None:
+                    warnings.append(msg)
         page = res.get("nextPageToken")
         if not page:
             return files
@@ -604,7 +629,9 @@ def _version_rank(name: str) -> float:
     plain "ITT".
     """
     best = None
-    stem = os.path.splitext(name)[0]
+    # The file's own name only: a folder called "v2 annexes" must not version
+    # every file inside it.
+    stem = os.path.splitext(name.rsplit("/", 1)[-1])[0]
     for pattern in _VERSION_RES:
         for match in pattern.finditer(stem):
             try:
@@ -650,12 +677,27 @@ def _cluster(docs: list) -> list:
     return list(groups.values())
 
 
+_SUPERSEDED_SUFFIX = re.compile(r"[\s._-]*superseded\s*$", re.IGNORECASE)
+
+
+def _is_superseded_name(name: str) -> bool:
+    """True when "superseded" ends the file's name, before its extension.
+
+    Only a suffix counts: "ITT v1.0 superseded.docx" and "ITT v2superseded.docx" do,
+    while "Superseded Terms.pdf" and "Terms superseded by v2.pdf" do not. A title
+    that merely contains the word is never excluded from the evidence.
+    """
+    stem = os.path.splitext(name.rsplit("/", 1)[-1])[0]
+    return bool(_SUPERSEDED_SUFFIX.search(stem))
+
+
 def resolve_versions(docs: list) -> list:
     """Mark superseded copies. Returns the warnings raised.
 
-    Within a group of copies the highest filename version marker wins. Where no
-    marker separates them the group is left alone and warned about, rather than
-    resolved by guessing — the same refusal in report_writer._prefix_match.
+    A copy whose name ends in "superseded" never wins. Among the copies still
+    current, the highest filename version marker wins. Where no marker separates
+    them the group is left alone and warned about, rather than resolved by guessing
+    — the same refusal in report_writer._prefix_match.
     """
     warnings = []
     readable = [d for d in docs if d.text and not d.error]
@@ -666,9 +708,21 @@ def resolve_versions(docs: list) -> list:
         if len(group) < 2:
             continue
         members = [readable[i] for i in group]
-        ranked = sorted(members, key=lambda d: _version_rank(d.name), reverse=True)
+        current = [d for d in members if not _is_superseded_name(d.name)]
+        if not current:
+            names = ", ".join(f"'{d.name}'" for d in members)
+            msg = (
+                f"Every copy of one document is marked superseded in its name ({names}). "
+                f"All were kept — rename the current one so it does not end in "
+                f"'superseded'."
+            )
+            warnings.append(msg)
+            logger.warning(msg)
+            continue
+
+        ranked = sorted(current, key=lambda d: _version_rank(d.name), reverse=True)
         top = _version_rank(ranked[0].name)
-        winners = [d for d in members if _version_rank(d.name) == top]
+        winners = [d for d in current if _version_rank(d.name) == top]
 
         if len(winners) > 1:
             if TENDER_DOCS_WARN_UNRESOLVED:
@@ -750,8 +804,11 @@ def _fingerprint(files: list) -> str:
     to do nothing.
     """
     payload = {
+        # The name is in the key because it now carries the subfolder path, and
+        # because a file moved or renamed in Drive changes what the cached text
+        # is labelled and how its version is read, even with its bytes unchanged.
         "files": sorted(
-            (f["id"], str(f.get("size", "")), str(f.get("modifiedTime", "")))
+            (f["id"], f["name"], str(f.get("size", "")), str(f.get("modifiedTime", "")))
             for f in files
         ),
         "settings": [
@@ -855,7 +912,7 @@ def load_tender_documents(tender_data: dict) -> TenderDocuments:
 
     result.folder_name = folder["name"]
     try:
-        files = list_documents(folder["id"])
+        files = list_documents(folder["id"], warnings=result.warnings)
     except (HttpError, OSError) as e:
         msg = f"Could not list '{folder['name']}': {e}"
         logger.warning(f"  {msg}")

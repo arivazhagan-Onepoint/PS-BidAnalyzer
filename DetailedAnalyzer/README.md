@@ -123,6 +123,11 @@ prefix alone** — it is the OCDS global identifier, stable and distinct across 
 529 tracker rows, whereas the title half gets reworded. That also excludes the
 placeholder `Sample Tender #…` folders without needing to name them.
 
+The tender folder is read **recursively**: files in any subfolder (for example
+`Annexes/Pricing.xlsx`) are part of the pack, named by their path so the manifest
+and the prompt show where each came from. A subfolder that cannot be listed is
+reported as a warning and skipped; the rest of the pack is still read.
+
 Fetched **per row during the run**, not on the corpus's cadence: a pack belongs to
 its tender. Extracted text is cached per OCID under `knowledge/tender_docs/`
 (gitignored — these are the buyer's documents, usually under the ITT's own
