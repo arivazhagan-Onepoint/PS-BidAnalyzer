@@ -104,6 +104,17 @@ PROCESS_STATUSES = {"PreQualified", "ReCheck"}
 # Column holding the qualification status used for the filter above.
 STATUS_FIELD = "Bid Qualification"
 
+# --- Expiry pass (analyzer.expiry) ------------------------------------------
+# Before row selection, every run closes tenders still marked Bid or TBD whose
+# submission deadline has passed, moving them to QUALIFICATION_NOBID. Matched by
+# qualification FAMILY, so Bid(AI), Bid(Human) and bare Bid all expire alike —
+# decided 2026-11-12: a human Bid/TBD whose deadline is behind us is no longer a
+# live opportunity either, and leaving it open inflates the email's "Tenders
+# Needing your Attention" total. NoBid rows are already closed; PreQualified /
+# ReCheck rows are scored first and expire on the next run.
+DUE_DATE_FIELD  = "Tender Due Date"
+EXPIRE_FAMILIES = ("Bid", "TBD")
+
 # --- Bid knowledge maintenance (analyzer.maintain_knowledge) ----------------
 # A separate, scheduled maintenance flow (NOT the per-tender analysis) keeps the
 # bid knowledge current in two steps, both driven by the KNOWLEDGE_SOURCES table

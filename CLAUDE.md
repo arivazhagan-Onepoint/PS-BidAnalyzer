@@ -70,6 +70,14 @@ See `SETUP.md` for the full step-by-step (service account, sheet sharing, etc.).
 Entry point is `analyzer/main.py`, which orchestrates one run:
 
 1. `sheets_client.py` — opens the sheet (service-account auth) and reads tender rows.
+1a. Expiry pass — `expiry.py` (`find_expired()` / `build_expiry_update()`) runs over
+   the rows just read, **before** selection: any tender still in the `Bid` or `TBD`
+   family (`EXPIRE_FAMILIES` — AI, Human and bare alike, decided 2026-11-12) whose
+   `Tender Due Date` is strictly before today's UK date is closed as `NoBid(AI)`,
+   with a dated note prepended to `Reason(System)` and appended to `Comments`. No
+   model call. Blank or unparseable due dates and tenders due today are left alone.
+   The run summary carries `expired_Bid` / `expired_TBD` counts and an `expired`
+   list, logged and shown in the email as "Expired Tenders - This Run".
 2. Row selection — `Bid Qualification` in `PreQualified`/`ReCheck` is the analyzer's
    **single entry point**, applied once before the loop (`should_analyse()`), so
    manual overrides and already-qualified rows are dropped there and never reach

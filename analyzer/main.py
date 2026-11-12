@@ -21,6 +21,7 @@ import logging
 import sys
 import traceback
 from datetime import datetime
+from html import escape as html_escape
 
 from .config import (
     LOG_FILE,
@@ -30,10 +31,12 @@ from .config import (
     SHEET_NAME,
     STATUS_FIELD,
     PROCESS_STATUSES,
+    QUALIFICATION_NOBID,
     should_analyse,
     qualification_family,
 )
 from .analyzer import analyze_tender
+from .expiry import find_expired, build_expiry_update
 from .patterns import load_nobid_patterns, load_bid_patterns
 from .sheets_client import SheetsClient, status_color
 
@@ -131,7 +134,8 @@ def run(limit: int = None) -> dict:
         logger.info(f"--limit applied: analysing at most {limit} qualifying tender(s)")
 
     summary = {"eligible": 0, "analysed": 0, "Bid": 0, "TBD": 0, "NoBid": 0,
-               "skipped": 0, "errors": 0}
+               "skipped": 0, "errors": 0,
+               "expired_Bid": 0, "expired_TBD": 0, "expired": []}
     # Link the alert email straight to the PS Tender Tracker tab (uses the tab's
     # numeric gid so it opens on that tab, not just the spreadsheet default).
     summary["sheet_url"] = (
@@ -148,6 +152,36 @@ def run(limit: int = None) -> dict:
     updates = []
     row_color_map = {}   # row number -> background colour for changed rows
     new_status = {}      # row number -> qualification this run assigned
+
+    # Expiry pass, ahead of selection: any tender still marked Bid or TBD whose
+    # Tender Due Date is behind us can no longer be bid on, so it is closed as
+    # NoBid(AI) here. It works off the rows just read (no extra API call, no
+    # model call) and its updates ride the same batched write-back below. It can
+    # never collide with the scoring loop: Bid/TBD rows are by definition not
+    # PreQualified/ReCheck. See analyzer.expiry for what it leaves alone.
+    expired = find_expired(tenders, run_dt)
+    for item in expired:
+        updates.append((item.row, build_expiry_update(item, run_dt)))
+        new_status[item.row] = QUALIFICATION_NOBID
+        color = status_color(QUALIFICATION_NOBID)
+        if color:
+            row_color_map[item.row] = color
+        summary[f"expired_{item.family}"] += 1
+        summary["expired"].append({
+            "row": item.row,
+            "name": item.name,
+            "previous_status": item.previous_status,
+            "due_date": item.due_date.isoformat(),
+        })
+        logger.info(
+            f"Row {item.row}: due date {item.due_date.isoformat()} passed — "
+            f"{item.previous_status} -> {QUALIFICATION_NOBID} ('{item.name[:70]}')"
+        )
+    logger.info(
+        f"Expiry pass: {len(expired)} Bid/TBD tender(s) past their due date "
+        f"({summary['expired_Bid']} Bid, {summary['expired_TBD']} TBD) closed as "
+        f"{QUALIFICATION_NOBID}"
+    )
 
     # Status is the analyzer's entry point, applied once here rather than inside
     # the loop. The Sheets API can't filter by cell value server-side (the read
@@ -238,6 +272,15 @@ def run(limit: int = None) -> dict:
     logger.info(f"  Skipped  : {summary['skipped']} (eligible but no title/description)")
     logger.info(f"  Errors   : {summary['errors']}")
     logger.info("-" * 80)
+    logger.info("  EXPIRED (due date passed, closed as NoBid)")
+    logger.info(f"  Bid -> NoBid : {summary['expired_Bid']}")
+    logger.info(f"  TBD -> NoBid : {summary['expired_TBD']}")
+    for item in summary["expired"]:
+        logger.info(
+            f"    row {item['row']:>4}  {item['previous_status']:<11} due "
+            f"{item['due_date']}  {item['name'][:60]}"
+        )
+    logger.info("-" * 80)
     logger.info(f"  Sheet-wide Bid : {summary['overall_Bid']}")
     logger.info(f"  Sheet-wide TBD : {summary['overall_TBD']}")
     logger.info(
@@ -284,6 +327,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         ("NoBid", s.get("NoBid", 0)),
         ("Skipped (no title / description)", s.get("skipped", 0)),
         ("Errors", s.get("errors", 0)),
+        ("Expired (due date passed, closed as NoBid)", len(s.get("expired", []))),
     ]
     rows = "".join(
         f"<tr><td>{label}</td><td style='text-align:right'>{value}</td></tr>"
@@ -316,6 +360,40 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
         if sheet_url else ""
     )
 
+    # Expiry pass: the Bid/TBD tenders this run closed because their submission
+    # deadline had passed. Counted by the family they were in (Bid -> NoBid,
+    # TBD -> NoBid) and listed one per row so the team can see exactly which
+    # opportunities dropped out of the attention total. Omitted when nothing
+    # expired (and on a fatal error, where the pass never ran).
+    expired_items = s.get("expired", [])
+    expired_table = ""
+    if expired_items:
+        expired_rows = "".join(
+            f"<tr><td>{html_escape(item['name']) or '(no name)'}</td>"
+            f"<td>{html_escape(item['previous_status'])}</td>"
+            f"<td>{item['due_date']}</td>"
+            f"<td style='text-align:right'>{item['row']}</td></tr>"
+            for item in expired_items
+        )
+        expired_table = f"""\
+  <h3 style="margin:16px 0 4px;font-size:15px">Expired Tenders - This Run</h3>
+  <p style="margin:0 0 6px;font-size:13px;color:#555">
+     Bid / TBD tenders whose Tender Due Date has passed, closed as NoBid(AI).</p>
+  <table cellpadding="8" cellspacing="0" border="1"
+         style="border-collapse:collapse;border-color:#ddd;font-size:14px">
+    <tr style="background:#f0f0f0"><th align="left">Change</th><th>Count</th></tr>
+    <tr><td>Bid &rarr; NoBid</td><td style="text-align:right">{s.get('expired_Bid', 0)}</td></tr>
+    <tr><td>TBD &rarr; NoBid</td><td style="text-align:right">{s.get('expired_TBD', 0)}</td></tr>
+    <tr style="background:#f9f9f9"><td><b>Total expired</b></td>
+        <td style="text-align:right"><b>{len(expired_items)}</b></td></tr>
+  </table>
+  <table cellpadding="6" cellspacing="0" border="1"
+         style="border-collapse:collapse;border-color:#ddd;font-size:13px;margin-top:8px">
+    <tr style="background:#f0f0f0"><th align="left">Tender</th><th align="left">Was</th>
+        <th align="left">Due date</th><th>Row</th></tr>
+    {expired_rows}
+  </table>"""
+
     details = ""
     if error_tb:
         details = (
@@ -342,6 +420,7 @@ def _build_report(summary, started_at, finished_at, run_date, environment,
     <tr style="background:#f0f0f0"><th align="left">Metric</th><th>Count</th></tr>
     {rows}
   </table>
+{expired_table}
   {details}
   <p style="color:#888;font-size:12px;margin-top:20px">
      Automated message from the PS BidAnalyzer.</p>

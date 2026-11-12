@@ -24,9 +24,14 @@ awaiting qualification), then two tables:
   the sheet after write-back. Omitted entirely on a fatal error, where no totals
   were produced (better than showing a misleading 0).
 - **Bid Analysis - This Run** — the per-run metrics (Eligible / Analysed / Bid /
-  TBD / NoBid / Skipped / Errors). `Eligible` leads because it is the run's scope;
-  `Analysed` below it shows how much of that scope was got through, the two
-  differing when `--limit` is set or a row has no title/description.
+  TBD / NoBid / Skipped / Errors / Expired). `Eligible` leads because it is the
+  run's scope; `Analysed` below it shows how much of that scope was got through,
+  the two differing when `--limit` is set or a row has no title/description.
+- **Expired Tenders - This Run** — only when the expiry pass closed something:
+  `Bid → NoBid` and `TBD → NoBid` counts (by the family the row was in), then one
+  line per tender (name, previous status, due date, row). Built from
+  `summary['expired']` / `expired_Bid` / `expired_TBD`; names are HTML-escaped.
+  These rows are already reflected in the Overall Summary totals above.
 
 The sheet hyperlink sits between them. The sheet-wide figures are also written to
 the run log so a run is auditable without opening the email.

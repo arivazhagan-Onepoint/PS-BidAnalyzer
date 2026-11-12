@@ -12,6 +12,9 @@ model to score Onepoint's fit for each tender out of 100, and writes back a
 project_config.json ──▶ SheetsClient.read_tenders()
                               │  (Name = title, Tender Description = description)
                               ▼
+                        expiry pass: Bid/TBD rows whose Tender Due Date has
+                        passed ──▶ NoBid(AI) (no model call; see expiry.py)
+                              ▼
                         filter: only Bid Qualification ∈ {PreQualified, ReCheck}
                               │  (skips manual overrides & already-analysed rows)
                               ▼
@@ -31,6 +34,7 @@ project_config.json ──▶ SheetsClient.read_tenders()
 |------|----------------|
 | `main.py` | Orchestration: read sheet → analyse each tender → write back. Entry point. |
 | `analyzer.py` | Core `analyze_tender()` — prompts the model and maps score → qualification. |
+| `expiry.py` | Expiry pass: closes Bid/TBD tenders whose due date has passed as `NoBid(AI)`. |
 | `openrouter_client.py` | OpenRouter/OpenAI client (same pattern as `keyword_search.py`). |
 | `onepoint_context.py` | Loads the Onepoint capability context that grounds the analysis. |
 | `knowledge/onepoint_capabilities.md` | The capability context. **Populate this** from the NotebookLM sources. |
@@ -82,6 +86,21 @@ Only rows whose `Bid Qualification` is a **system-assigned** value are analysed
 
 Manual overrides are detected implicitly: `PreQualified`/`ReCheck` are only ever
 written by automated steps, so any other value means a human touched the row.
+
+## Expiry pass (runs first)
+
+Before the rows above are selected, every run closes tenders that can no longer
+be bid on. A row in the **Bid or TBD family** — `Bid(AI)`, `TBD(AI)`,
+`Bid(Human)`, `TBD(Human)`, bare `Bid` / `TBD` — whose `Tender Due Date` is
+strictly before today's UK date becomes `NoBid(AI)`, with a dated note in
+`Bid Qualification Reason(System)` and `Comments`. `Reason(Human)` is untouched.
+This is the one place the analyzer changes a human-set status; it was chosen
+(2026-11-12) because a past-deadline tender is closed regardless of who marked it.
+
+Left alone: a blank due date (the scraper cannot always populate it), a date that
+does not parse (logged, never expired on a guess), a tender due today, and every
+other status. The log and the email list each expired tender with its previous
+status and due date, plus `Bid → NoBid` and `TBD → NoBid` counts.
 
 ## Score thresholds
 
